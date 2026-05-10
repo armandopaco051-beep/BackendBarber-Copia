@@ -47,11 +47,24 @@ INSTALLED_APPS = [
     'rest_framework',
     'rest_framework_simplejwt',
     'rest_framework_simplejwt.token_blacklist',
-    'corsheaders',
-    # Propias
-    'apps.seguridad',
-
-]
+     'corsheaders',
+      # Propias
+     # apps.seguridad: autenticacion, permisos, roles, usuarios y bitacora base.
+     'apps.seguridad',
+     # apps.usuario: rutas ordenadas para perfil, login, usuarios, roles y barberos.
+     'apps.usuario',
+     # apps.servicios: CU6 categorias y CU10 servicios.
+     'apps.servicios',
+     # apps.citas: CU8 horarios, CU9 asistencia y CU11 citas.
+     'apps.citas',
+     # apps.inventario: preparado para productos e insumos.
+     'apps.inventario',
+     # apps.ventas_caja: preparado para pagos, ventas, caja y movimientos.
+     'apps.ventas_caja',
+     # apps.reportes: preparado para reportes del sistema.
+     'apps.reportes',
+  
+  ]
 
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
@@ -136,6 +149,15 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",  # React/Vite
     "http://localhost:3000",  # Create React App
 ]
+
+EMAIL_BACKEND = os.getenv('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')
+EMAIL_HOST = os.getenv('EMAIL_HOST', 'smtp.gmail.com')
+EMAIL_PORT = int(os.getenv('EMAIL_PORT', '587'))
+EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'True').lower() == 'true'
+EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
+EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', EMAIL_HOST_USER or 'no-reply@blessedbarber.local')
+
 # Internationalization
 # https://docs.djangoproject.com/en/6.0/topics/i18n/
 

@@ -20,7 +20,17 @@ from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, Sp
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+
+    # Ruta historica del proyecto. Se mantiene para no romper Swagger/frontend existente.
     path('api/seguridad/', include('apps.seguridad.urls')),
+
+    # Nuevos paquetes funcionales organizados por responsabilidad.
+    path('api/usuario/', include('apps.usuario.urls')),
+    path('api/servicios/', include('apps.servicios.urls')),
+    path('api/citas/', include('apps.citas.urls')),
+    path('api/inventario/', include('apps.inventario.urls')),
+    path('api/ventas-caja/', include('apps.ventas_caja.urls')),
+    path('api/reportes/', include('apps.reportes.urls')),
      # ── Documentación ────────────────────────────────────────
     path('api/schema/', SpectacularAPIView.as_view(), name='schema'),
     path('api/docs/', SpectacularSwaggerView.as_view(url_name='schema'), name='swagger-ui'),
