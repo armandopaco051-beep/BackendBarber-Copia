@@ -20,7 +20,7 @@ from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, Sp
 from django.views.generic import RedirectView
 
 urlpatterns = [
-    path('', RedirectView.as_view(url='/login')),  # ← agrega esta línea
+    path('', RedirectView.as_view(url='/api/docs/')),  # ← agrega esta línea
     path('admin/', admin.site.urls),
 
     # Ruta historica del proyecto. Se mantiene para no romper Swagger/frontend existente.
