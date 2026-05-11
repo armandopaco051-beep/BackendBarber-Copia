@@ -31,12 +31,16 @@ SECRET_KEY = 'django-insecure-^%p53a23@w(si^(-w^grqdns3p4p8%s3^-x^2@&ge*0ilquj+3
 DEBUG = os.getenv('DEBUG', 'False') == 'True'
 
 ALLOWED_HOSTS = [
+    'backend-barberia-ohjh.onrender.com/',
     'localhost',
     '127.0.0.1',
     '.onrender.com',
 ]
 
-
+CSRF_TRUSTED_ORIGINS = [
+    'https://backend-barberia-ohjh.onrender.com/',
+    'https://*.onrender.com'
+]
 # Application definition
 
 INSTALLED_APPS = [
@@ -185,3 +189,4 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
+STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
