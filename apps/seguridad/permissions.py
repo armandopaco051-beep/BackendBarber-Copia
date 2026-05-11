@@ -1,4 +1,4 @@
-from rest_framework.permissions import BasePermission
+from rest_framework.permissions import BasePermission, SAFE_METHODS
 from .models import Rol, Usuario
 
 
@@ -66,3 +66,19 @@ class EsCualquierUsuario(BasePermission):
     """
     def has_permission(self, request, view):
         return getattr(request, 'usuario_actual', None) is not None
+
+
+class EsAdminOLecturaAutenticada(BasePermission):
+    """
+    Permite que cualquier usuario autenticado haga consultas GET.
+    Para crear, editar o eliminar exige Administrador.
+    """
+    message = "Solo el Administrador puede modificar esta informacion."
+
+    def has_permission(self, request, view):
+        usuario = getattr(request, 'usuario_actual', None)
+        if not usuario:
+            return False
+        if request.method in SAFE_METHODS:
+            return True
+        return usuario.es_admin

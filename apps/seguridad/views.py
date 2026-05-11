@@ -31,7 +31,7 @@ from .serializers import (
     BarberoCrearSerializer,
     BarberoSerializer,
 )
-from .permissions import EsAdmin, EsAdminOConfiguracionInicial, EsCualquierUsuario
+from .permissions import EsAdmin, EsAdminOConfiguracionInicial, EsAdminOLecturaAutenticada, EsCualquierUsuario
 from .authentication import generar_tokens
 
 
@@ -574,7 +574,7 @@ class RolDetalleView(APIView):
 
 @extend_schema(tags=["CU5 - Gestionar Barberos"])
 class BarberoListCreateView(APIView):
-    permission_classes = [EsAdmin]
+    permission_classes = [EsAdminOLecturaAutenticada]
 
     def _get_rol_barbero(self):
         try:

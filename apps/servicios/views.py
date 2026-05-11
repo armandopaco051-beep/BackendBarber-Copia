@@ -3,7 +3,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from drf_spectacular.utils import extend_schema, OpenApiExample, OpenApiResponse
 
-from apps.seguridad.permissions import EsAdmin
+from apps.seguridad.permissions import EsAdmin, EsAdminOLecturaAutenticada
 from apps.seguridad.views import registrar_bitacora
 
 from .models import CategoriaServicio, Servicio
@@ -14,7 +14,7 @@ from .serializers import CategoriaServicioSerializer, ServicioSerializer
 # GET lista categorias y POST crea una nueva categoria.
 @extend_schema(tags=["CU6 - Gestionar Categorias"])
 class CategoriaServicioListCreateView(APIView):
-    permission_classes = [EsAdmin]
+    permission_classes = [EsAdminOLecturaAutenticada]
 
     @extend_schema(
         summary="Listar categorias de servicios",
@@ -123,7 +123,7 @@ class CategoriaServicioDetalleView(APIView):
 # GET lista servicios y POST crea un nuevo servicio.
 @extend_schema(tags=["CU10 - Gestionar Servicios"])
 class ServicioListCreateView(APIView):
-    permission_classes = [EsAdmin]
+    permission_classes = [EsAdminOLecturaAutenticada]
 
     @extend_schema(
         summary="Listar servicios",
