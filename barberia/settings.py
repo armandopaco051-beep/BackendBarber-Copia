@@ -35,6 +35,8 @@ ALLOWED_HOSTS = [
     'localhost',
     '127.0.0.1',
     '.onrender.com',
+    'frontend-barberia-sage.vercel.app'
+
 ]
 
 CSRF_TRUSTED_ORIGINS = [

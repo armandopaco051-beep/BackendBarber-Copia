@@ -20,13 +20,13 @@ from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, Sp
 from django.views.generic import RedirectView
 
 urlpatterns = [
-    path('', RedirectView.as_view(url='/api/docs/')),  # ← agrega esta línea
+    path('', RedirectView.as_view(url='/login')),  # ← agrega esta línea
     path('admin/', admin.site.urls),
 
     # Ruta historica del proyecto. Se mantiene para no romper Swagger/frontend existente.
     path('api/seguridad/', include('apps.seguridad.urls')),
 
-    # Nuevos paquetes funcionales organizados por responsabilidad.
+    # Nuevos paquetes funcionales organizados por responsabilidad.t
     path('api/usuario/', include('apps.usuario.urls')),
     path('api/servicios/', include('apps.servicios.urls')),
     path('api/citas/', include('apps.citas.urls')),
