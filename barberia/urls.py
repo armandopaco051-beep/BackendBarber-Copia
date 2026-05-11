@@ -17,8 +17,10 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import path,include
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
+from django.views.generic import RedirectView
 
 urlpatterns = [
+    path('', RedirectView.as_view(url='/api/docs/')),  # ← agrega esta línea
     path('admin/', admin.site.urls),
 
     # Ruta historica del proyecto. Se mantiene para no romper Swagger/frontend existente.
