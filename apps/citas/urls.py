@@ -8,6 +8,8 @@ from .views import (
     DisponibilidadBarberoView,
     EstadoCitaListView,
     HistorialEstadoCitaListView,
+    PromocionDetalleView,
+    PromocionListCreateView,
 )
 
 from apps.seguridad.views import (
@@ -42,5 +44,7 @@ urlpatterns = [
     path('citas/', CitaListCreateView.as_view(), name='cita-list-create'),
     path('citas/<int:id_cita>/', CitaDetalleView.as_view(), name='cita-detalle'),
     path('citas/<int:id_cita>/historial/', HistorialEstadoCitaListView.as_view(), name='cita-historial'),
+    path('promociones/', PromocionListCreateView.as_view(), name='promocion-list-create'),
+    path('promociones/<int:id_promocion>/', PromocionDetalleView.as_view(), name='promocion-detalle'),
     path('disponibilidad/', DisponibilidadBarberoView.as_view(), name='cita-disponibilidad'),
 ]

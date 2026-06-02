@@ -11,7 +11,7 @@ from apps.seguridad.permissions import EsAdmin
 from apps.seguridad.views import registrar_bitacora
 from apps.servicios.models import Servicio
 
-from .models import BarberoServicio, Cita, EstadoCita
+from .models import BarberoServicio, Cita, EstadoCita, Promocion
 from .serializers import (
     BarberoServicioSerializer,
     CitaSerializer,
@@ -19,7 +19,12 @@ from .serializers import (
     ESTADOS_NO_BLOQUEAN_HORARIO,
     EstadoCitaSerializer,
     HistorialEstadoCitaSerializer,
+    PromocionSerializer,
 )
+
+
+ESTADOS_ASISTENCIA_NO_DISPONIBLES = ['AUSENTE', 'PERMISO', 'INHABILITADO']
+CODIGOS_TODOS_BARBEROS = {'TODOS', 'ANY', 'CUALQUIERA'}
 
 
 # Funcion auxiliar para sumar minutos a una hora.
@@ -54,6 +59,103 @@ def parsear_fecha_frontend(valor):
 def cruza_intervalo(inicio_a, fin_a, inicio_b, fin_b):
     # Dos rangos se cruzan cuando el inicio de uno es menor al fin del otro y viceversa.
     return inicio_a < fin_b and fin_a > inicio_b
+
+
+def es_modo_todos_barberos(codigo_barbero):
+    return str(codigo_barbero or '').strip().upper() in CODIGOS_TODOS_BARBEROS or str(codigo_barbero or '').strip() == ''
+
+
+def barbero_habilitado_para_servicio(barbero, servicio):
+    asignaciones = BarberoServicio.objects.filter(codigo_barbero=barbero)
+    if not asignaciones.exists():
+        return True
+    return asignaciones.filter(id_servicio=servicio, estado='ACTIVO').exists()
+
+
+def consultar_horarios_barbero(barbero, fecha):
+    dia_semana = DIAS_SEMANA[fecha.weekday()]
+    return HorarioLaboral.objects.filter(
+        codigo_barbero=barbero,
+        dia_semana__iexact=dia_semana,
+        estado__iexact='ACTIVO'
+    ).order_by('hora_inicio')
+
+
+def consultar_asistencia_barbero(barbero, fecha):
+    return AsistenciaBarbero.objects.filter(codigo_barbero=barbero, fecha=fecha).first()
+
+
+def consultar_bloqueos_barbero(barbero, fecha):
+    return list(BloqueoHorario.objects.filter(
+        codigo_barbero=barbero,
+        fecha=fecha,
+        estado__iexact='ACTIVO',
+    ).values('hora_inicio', 'hora_fin'))
+
+
+def consultar_citas_barbero(barbero, fecha):
+    return list(Cita.objects.select_related('id_estadoc').filter(
+        codigo_barbero=barbero,
+        fecha=fecha,
+    ).exclude(id_estadoc__nombre__in=ESTADOS_NO_BLOQUEAN_HORARIO).values('hora_inicio', 'hora_fin'))
+
+
+def generar_bloques_horario(fecha, horario, duracion_minutos):
+    inicio = datetime.combine(fecha, horario.hora_inicio)
+    fin_jornada = datetime.combine(fecha, horario.hora_fin)
+    paso = timedelta(minutes=duracion_minutos)
+
+    while inicio + paso <= fin_jornada:
+        yield inicio.time(), (inicio + paso).time()
+        inicio += paso
+
+
+def calcular_disponibilidad_barbero(barbero, servicio, fecha):
+    if servicio.duracion_minutos <= 0:
+        return {'disponibles': [], 'mensaje': 'El servicio no tiene una duracion valida.'}
+
+    if not barbero_habilitado_para_servicio(barbero, servicio):
+        return {'disponibles': [], 'mensaje': 'El barbero seleccionado no tiene habilitado ese servicio.'}
+
+    asistencia = consultar_asistencia_barbero(barbero, fecha)
+    estado_asistencia = str(getattr(asistencia, 'estado', '')).upper()
+    if asistencia and estado_asistencia in ESTADOS_ASISTENCIA_NO_DISPONIBLES:
+        return {'disponibles': [], 'mensaje': 'El barbero no esta disponible para la fecha seleccionada.'}
+
+    horarios = consultar_horarios_barbero(barbero, fecha)
+    if not horarios.exists():
+        return {'disponibles': [], 'mensaje': 'El barbero no tiene horario laboral activo para la fecha seleccionada.'}
+
+    bloqueos_del_dia = consultar_bloqueos_barbero(barbero, fecha)
+    citas_del_dia = consultar_citas_barbero(barbero, fecha)
+    disponibles = []
+
+    for horario in horarios:
+        for hora_inicio, hora_fin in generar_bloques_horario(fecha, horario, servicio.duracion_minutos):
+            cruza_descanso = False
+            if horario.hora_inicio_descanso and horario.hora_fin_descanso:
+                cruza_descanso = cruza_intervalo(
+                    hora_inicio,
+                    hora_fin,
+                    horario.hora_inicio_descanso,
+                    horario.hora_fin_descanso,
+                )
+
+            cruza_bloqueo = any(
+                cruza_intervalo(hora_inicio, hora_fin, bloqueo['hora_inicio'], bloqueo['hora_fin'])
+                for bloqueo in bloqueos_del_dia
+            )
+            cruza_cita = any(
+                cruza_intervalo(hora_inicio, hora_fin, cita['hora_inicio'], cita['hora_fin'])
+                for cita in citas_del_dia
+            )
+
+            if not cruza_descanso and not cruza_bloqueo and not cruza_cita:
+                disponibles.append(hora_inicio.strftime('%H:%M:%S'))
+
+    disponibles = sorted(set(disponibles))
+    mensaje = '' if disponibles else 'No hay horarios disponibles para ese barbero, servicio y fecha.'
+    return {'disponibles': disponibles, 'mensaje': mensaje}
 
 
 # Lista los estados posibles de una cita.
@@ -344,16 +446,119 @@ class HistorialEstadoCitaListView(APIView):
         return Response(HistorialEstadoCitaSerializer(historial, many=True).data, status=status.HTTP_200_OK)
 
 
+@extend_schema(tags=["CU12 - Gestionar Promociones"])
+class PromocionListCreateView(APIView):
+    permission_classes = [EsAdmin]
+
+    @extend_schema(
+        summary="Listar promociones",
+        description="Lista promociones. Permite filtrar por estado, servicio y nombre.",
+        responses={200: PromocionSerializer(many=True)}
+    )
+    def get(self, request):
+        promociones = Promocion.consultar()
+        estado_filtro = request.query_params.get('estado')
+        id_servicio = request.query_params.get('id_servicio')
+        nombre = request.query_params.get('nombre')
+
+        if estado_filtro:
+            promociones = promociones.filter(estado=estado_filtro.upper())
+        if id_servicio:
+            promociones = promociones.filter(servicios__id_servicio=id_servicio)
+        if nombre:
+            promociones = promociones.filter(nombre__icontains=nombre)
+
+        registrar_bitacora(request, 'CONSULTAR_PROMOCIONES', 'Consulta de promociones.')
+        return Response(PromocionSerializer(promociones.distinct(), many=True).data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        summary="Crear promocion",
+        request=PromocionSerializer,
+        responses={
+            201: OpenApiResponse(description="Promocion registrada."),
+            400: OpenApiResponse(description="Datos invalidos."),
+        }
+    )
+    def post(self, request):
+        serializer = PromocionSerializer(data=request.data)
+        if serializer.is_valid():
+            promocion = serializer.save()
+            registrar_bitacora(request, 'CREAR_PROMOCION', f'Promocion creada: {promocion.id_promocion}.')
+            return Response(
+                {'mensaje': 'Promocion registrada correctamente.', 'promocion': PromocionSerializer(promocion).data},
+                status=status.HTTP_201_CREATED
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@extend_schema(tags=["CU12 - Gestionar Promociones"])
+class PromocionDetalleView(APIView):
+    permission_classes = [EsAdmin]
+
+    def _get_promocion(self, id_promocion):
+        try:
+            return Promocion.consultar().get(pk=id_promocion)
+        except Promocion.DoesNotExist:
+            return None
+
+    @extend_schema(
+        summary="Ver detalle de promocion",
+        responses={200: PromocionSerializer, 404: OpenApiResponse(description="No encontrada.")}
+    )
+    def get(self, request, id_promocion):
+        promocion = self._get_promocion(id_promocion)
+        if not promocion:
+            return Response({'error': 'Promocion no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        registrar_bitacora(request, 'CONSULTAR_PROMOCIONES', f'Consulta de promocion {id_promocion}.')
+        return Response(PromocionSerializer(promocion).data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        summary="Actualizar promocion",
+        request=PromocionSerializer,
+        responses={
+            200: OpenApiResponse(description="Promocion actualizada."),
+            400: OpenApiResponse(description="Datos invalidos."),
+            404: OpenApiResponse(description="No encontrada."),
+        }
+    )
+    def put(self, request, id_promocion):
+        promocion = self._get_promocion(id_promocion)
+        if not promocion:
+            return Response({'error': 'Promocion no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        serializer = PromocionSerializer(promocion, data=request.data, partial=True)
+        if serializer.is_valid():
+            promocion = serializer.save()
+            registrar_bitacora(request, 'ACTUALIZAR_PROMOCION', f'Promocion actualizada: {promocion.id_promocion}.')
+            return Response(
+                {'mensaje': 'Promocion actualizada correctamente.', 'promocion': PromocionSerializer(promocion).data},
+                status=status.HTTP_200_OK
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @extend_schema(
+        summary="Desactivar promocion",
+        description="No elimina la promocion; la deja como INACTIVO.",
+        responses={200: OpenApiResponse(description="Promocion desactivada."), 404: OpenApiResponse(description="No encontrada.")}
+    )
+    def delete(self, request, id_promocion):
+        promocion = self._get_promocion(id_promocion)
+        if not promocion:
+            return Response({'error': 'Promocion no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        promocion.cambiar_estado('INACTIVO')
+        registrar_bitacora(request, 'DESACTIVAR_PROMOCION', f'Promocion desactivada: {promocion.id_promocion}.')
+        return Response({'mensaje': 'Promocion desactivada correctamente.'}, status=status.HTTP_200_OK)
+
+
 # Endpoint de apoyo para frontend.
 # Devuelve horarios disponibles segun barbero, servicio y fecha.
-@extend_schema(tags=["CU11 - Gestionar Citas"])
+@extend_schema(tags=["CU24 - Consultar Disponibilidad"])
 class DisponibilidadBarberoView(APIView):
     permission_classes = [EsAdmin]
 
     @extend_schema(
         summary="Consultar horarios disponibles",
         parameters=[
-            OpenApiParameter(name='codigo_barbero', required=True, type=str),
+            OpenApiParameter(name='codigo_barbero', required=False, type=str),
             OpenApiParameter(name='id_servicio', required=True, type=int),
             OpenApiParameter(name='fecha', required=True, type=str),
         ],
@@ -378,10 +583,10 @@ class DisponibilidadBarberoView(APIView):
         fecha_valor = obtener_query_param(request.query_params, 'fecha', 'date')
         fecha = parsear_fecha_frontend(fecha_valor)
 
-        if not codigo_barbero or not id_servicio or not fecha:
+        if not id_servicio or not fecha:
             return Response(
                 {
-                    'error': 'Debe enviar codigo_barbero, id_servicio y fecha.',
+                    'error': 'Debe enviar id_servicio y fecha. codigo_barbero es opcional.',
                     'recibido': {
                         'codigo_barbero': codigo_barbero,
                         'id_servicio': id_servicio,
@@ -391,92 +596,44 @@ class DisponibilidadBarberoView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        barbero = Usuario.objects.select_related('id_rol').filter(codigo=codigo_barbero, id_rol__nombre__iexact='barbero').first()
         servicio = Servicio.objects.filter(pk=id_servicio, estado='ACTIVO').first()
 
-        if not barbero:
-            return Response({'error': 'Barbero no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
         if not servicio:
             return Response({'error': 'Servicio activo no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
-        if servicio.duracion_minutos <= 0:
-            return Response(
-                {'disponibles': [], 'mensaje': 'El servicio no tiene una duracion valida.'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
 
-        asistencia = AsistenciaBarbero.objects.filter(codigo_barbero=barbero, fecha=fecha).first()
-        if asistencia and asistencia.estado in ['AUSENTE', 'PERMISO', 'INHABILITADO']:
-            return Response({'disponibles': [], 'mensaje': 'El barbero no esta disponible por asistencia registrada.'})
+        if es_modo_todos_barberos(codigo_barbero):
+            barberos = Usuario.objects.select_related('id_rol').filter(
+                id_rol__nombre__iexact='barbero'
+            ).order_by('nombre', 'apellido', 'codigo')
 
-        dia_semana = DIAS_SEMANA[fecha.weekday()]
-        horarios = HorarioLaboral.objects.filter(
-            codigo_barbero=barbero,
-            dia_semana__iexact=dia_semana,
-            estado__iexact='ACTIVO'
-        )
-        if not horarios.exists():
-            horarios_registrados = HorarioLaboral.objects.filter(
-                codigo_barbero=barbero
-            ).values('dia_semana', 'hora_inicio', 'hora_fin', 'estado')
+            disponibilidad_por_barbero = []
+            for barbero in barberos:
+                resultado = calcular_disponibilidad_barbero(barbero, servicio, fecha)
+                if resultado['disponibles']:
+                    disponibilidad_por_barbero.append({
+                        'codigo_barbero': barbero.codigo,
+                        'barbero': f"{barbero.nombre} {barbero.apellido}".strip(),
+                        'disponibles': resultado['disponibles'],
+                    })
+
+            mensaje = '' if disponibilidad_por_barbero else 'No hay horarios disponibles para la fecha y servicio seleccionados.'
             return Response(
                 {
-                    'disponibles': [],
-                    'mensaje': f'Barbero no disponible: no tiene horario laboral activo para {dia_semana}.',
-                    'debug': {
-                        'codigo_barbero': barbero.codigo,
-                        'fecha': fecha.isoformat(),
-                        'dia_semana_calculado': dia_semana,
-                        'horarios_registrados': list(horarios_registrados),
-                    }
+                    'fecha': fecha.isoformat(),
+                    'id_servicio': servicio.id_servicio,
+                    'servicio': servicio.nombre,
+                    'barberos': disponibilidad_por_barbero,
+                    'mensaje': mensaje,
                 },
                 status=status.HTTP_200_OK
             )
 
-        disponibles = []
+        barbero = Usuario.objects.select_related('id_rol').filter(
+            codigo=codigo_barbero,
+            id_rol__nombre__iexact='barbero'
+        ).first()
+        if not barbero:
+            return Response({'error': 'Barbero no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
 
-        bloqueos_del_dia = list(BloqueoHorario.objects.filter(
-            codigo_barbero=barbero,
-            fecha=fecha,
-            estado__iexact='ACTIVO',
-        ).values('hora_inicio', 'hora_fin'))
-
-        citas_del_dia = list(Cita.objects.select_related('id_estadoc').filter(
-            codigo_barbero=barbero,
-            fecha=fecha,
-        ).exclude(id_estadoc__nombre__in=ESTADOS_NO_BLOQUEAN_HORARIO).values('hora_inicio', 'hora_fin'))
-
-        for horario in horarios:
-            # Recorre la jornada laboral en bloques iguales a la duracion del servicio.
-            inicio = datetime.combine(fecha, horario.hora_inicio)
-            fin_jornada = datetime.combine(fecha, horario.hora_fin)
-            paso = timedelta(minutes=servicio.duracion_minutos)
-
-            while inicio + paso <= fin_jornada:
-                hora_inicio = inicio.time()
-                hora_fin = (inicio + paso).time()
-
-                cruza_descanso = False
-                if horario.hora_inicio_descanso and horario.hora_fin_descanso:
-                    cruza_descanso = hora_inicio < horario.hora_fin_descanso and hora_fin > horario.hora_inicio_descanso
-
-                cruza_bloqueo = any(
-                    cruza_intervalo(hora_inicio, hora_fin, bloqueo['hora_inicio'], bloqueo['hora_fin'])
-                    for bloqueo in bloqueos_del_dia
-                )
-
-                cruza_cita = any(
-                    cruza_intervalo(hora_inicio, hora_fin, cita['hora_inicio'], cita['hora_fin'])
-                    for cita in citas_del_dia
-                )
-
-                if not cruza_descanso and not cruza_bloqueo and not cruza_cita:
-                    # Si no cruza descanso, bloqueo ni cita, se devuelve como disponible.
-                    disponibles.append(hora_inicio.strftime('%H:%M:%S'))
-
-                inicio += paso
-
-        mensaje = ''
-        if not disponibles:
-            mensaje = 'No hay horarios disponibles para ese barbero, servicio y fecha.'
-
-        return Response({'disponibles': disponibles, 'mensaje': mensaje}, status=status.HTTP_200_OK)
+        resultado = calcular_disponibilidad_barbero(barbero, servicio, fecha)
+        return Response(resultado, status=status.HTTP_200_OK)

@@ -7,7 +7,14 @@ from rest_framework import serializers
 from apps.seguridad.models import AsistenciaBarbero, BloqueoHorario, HorarioLaboral, Usuario
 from apps.servicios.models import Servicio
 
-from .models import BarberoServicio, Cita, EstadoCita, HistorialEstadoCita
+from .models import (
+    BarberoServicio,
+    Cita,
+    DetallePromocion,
+    EstadoCita,
+    HistorialEstadoCita,
+    Promocion,
+)
 
 
 DIAS_SEMANA = {
@@ -31,7 +38,7 @@ ESTADOS_CITA = [
     'ANULADA',
 ]
 
-ESTADOS_NO_BLOQUEAN_HORARIO = ['CANCELADA', 'REPROGRAMADA', 'ANULADA']
+ESTADOS_NO_BLOQUEAN_HORARIO = ['CANCELADA', 'ANULADA', 'NO_ASISTIO']
 
 
 # Convierte textos del frontend a formato uniforme de estados.
@@ -166,6 +173,131 @@ class HistorialEstadoCitaSerializer(serializers.ModelSerializer):
         return f"{obj.cambiado_por.nombre} {obj.cambiado_por.apellido}".strip()
 
 
+class DetallePromocionSerializer(serializers.ModelSerializer):
+    servicio = serializers.CharField(source='id_servicio.nombre', read_only=True)
+    estado_servicio = serializers.CharField(source='id_servicio.estado', read_only=True)
+
+    class Meta:
+        model = DetallePromocion
+        fields = ['id_detalle', 'id_promocion', 'id_servicio', 'servicio', 'estado_servicio']
+
+
+class PromocionSerializer(serializers.ModelSerializer):
+    servicios = serializers.PrimaryKeyRelatedField(
+        queryset=Servicio.objects.filter(estado='ACTIVO'),
+        many=True,
+    )
+    servicios_detalle = serializers.SerializerMethodField(read_only=True)
+    vigente_hoy = serializers.BooleanField(read_only=True)
+    estado = serializers.CharField(max_length=20, required=False)
+    tipo_descuento = serializers.CharField(max_length=20)
+
+    class Meta:
+        model = Promocion
+        fields = [
+            'id_promocion',
+            'nombre',
+            'descripcion',
+            'tipo_descuento',
+            'valor_descuento',
+            'fecha_inicio',
+            'fecha_fin',
+            'estado',
+            'servicios',
+            'servicios_detalle',
+            'vigente_hoy',
+            'fecha_registro',
+            'fecha_actualizacion',
+        ]
+        read_only_fields = ['fecha_registro', 'fecha_actualizacion', 'vigente_hoy']
+
+    @extend_schema_field(DetallePromocionSerializer(many=True))
+    def get_servicios_detalle(self, obj):
+        detalles = obj.detalles_servicios.select_related('id_servicio').all()
+        return DetallePromocionSerializer(detalles, many=True).data
+
+    def validate_nombre(self, value):
+        nombre = value.strip()
+        if not nombre:
+            raise serializers.ValidationError("El nombre de la promocion es obligatorio.")
+
+        duplicada = Promocion.objects.filter(nombre__iexact=nombre)
+        if self.instance:
+            duplicada = duplicada.exclude(pk=self.instance.pk)
+        if duplicada.exists():
+            raise serializers.ValidationError("Ya existe una promocion con ese nombre.")
+        return nombre
+
+    def validate_tipo_descuento(self, value):
+        tipo = value.upper()
+        if tipo not in dict(Promocion.TIPOS_DESCUENTO):
+            raise serializers.ValidationError("Tipo de descuento invalido.")
+        return tipo
+
+    def validate_estado(self, value):
+        estado = value.upper()
+        if estado not in dict(Promocion.ESTADOS):
+            raise serializers.ValidationError("Estado invalido.")
+        return estado
+
+    def validate_valor_descuento(self, value):
+        if value <= 0:
+            raise serializers.ValidationError("El valor del descuento debe ser mayor a 0.")
+        return value
+
+    def validate(self, data):
+        instance = getattr(self, 'instance', None)
+        fecha_inicio = data.get('fecha_inicio', getattr(instance, 'fecha_inicio', None))
+        fecha_fin = data.get('fecha_fin', getattr(instance, 'fecha_fin', None))
+        tipo_descuento = data.get('tipo_descuento', getattr(instance, 'tipo_descuento', None))
+        valor_descuento = data.get('valor_descuento', getattr(instance, 'valor_descuento', None))
+        servicios = data.get('servicios')
+
+        if not fecha_inicio:
+            raise serializers.ValidationError({'fecha_inicio': 'La fecha de inicio es obligatoria.'})
+        if not fecha_fin:
+            raise serializers.ValidationError({'fecha_fin': 'La fecha de fin es obligatoria.'})
+        if fecha_inicio > fecha_fin:
+            raise serializers.ValidationError({'fecha_fin': 'La fecha de fin debe ser mayor o igual a la fecha de inicio.'})
+        if tipo_descuento == 'PORCENTAJE' and valor_descuento and valor_descuento > 100:
+            raise serializers.ValidationError({'valor_descuento': 'El porcentaje no puede ser mayor a 100.'})
+
+        if instance:
+            if servicios is not None and not servicios:
+                raise serializers.ValidationError({'servicios': 'Debe asociar al menos un servicio activo.'})
+        elif not servicios:
+            raise serializers.ValidationError({'servicios': 'Debe asociar al menos un servicio activo.'})
+
+        return data
+
+    def _actualizar_servicios(self, promocion, servicios):
+        DetallePromocion.objects.filter(id_promocion=promocion).delete()
+        DetallePromocion.objects.bulk_create([
+            DetallePromocion(id_promocion=promocion, id_servicio=servicio)
+            for servicio in servicios
+        ])
+
+    @transaction.atomic
+    def create(self, validated_data):
+        servicios = validated_data.pop('servicios', [])
+        promocion = Promocion.objects.create(**validated_data)
+        self._actualizar_servicios(promocion, servicios)
+        return promocion
+
+    @transaction.atomic
+    def update(self, instance, validated_data):
+        servicios = validated_data.pop('servicios', None)
+
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+
+        if servicios is not None:
+            self._actualizar_servicios(instance, servicios)
+
+        return instance
+
+
 # Serializer principal del CU11.
 # Aqui vive la logica que evita citas invalidas o cruzadas.
 class CitaSerializer(serializers.ModelSerializer):
@@ -271,6 +403,15 @@ class CitaSerializer(serializers.ModelSerializer):
         if servicio.estado != 'ACTIVO':
             raise serializers.ValidationError({"id_servicio": "El servicio seleccionado debe estar activo."})
 
+        asignaciones_barbero = BarberoServicio.objects.filter(codigo_barbero=barbero)
+        if asignaciones_barbero.exists() and not asignaciones_barbero.filter(
+            id_servicio=servicio,
+            estado='ACTIVO',
+        ).exists():
+            raise serializers.ValidationError({
+                "id_servicio": "El servicio seleccionado no esta habilitado para el barbero elegido."
+            })
+
         hora_fin = calcular_hora_fin(fecha, hora_inicio, servicio.duracion_minutos)
         # hora_fin y precio_base se calculan en backend, no los envia el frontend.
         data['hora_fin'] = hora_fin
@@ -308,7 +449,8 @@ class CitaSerializer(serializers.ModelSerializer):
     def _validar_asistencia(self, barbero, fecha):
         # Si el barbero esta AUSENTE, PERMISO o INHABILITADO, no puede recibir citas.
         asistencia = AsistenciaBarbero.objects.filter(codigo_barbero=barbero, fecha=fecha).first()
-        if asistencia and asistencia.estado in ['AUSENTE', 'PERMISO', 'INHABILITADO']:
+        estado_asistencia = str(getattr(asistencia, 'estado', '')).upper()
+        if asistencia and estado_asistencia in ['AUSENTE', 'PERMISO', 'INHABILITADO']:
             raise serializers.ValidationError("El barbero no esta disponible por asistencia registrada.")
 
     def _validar_bloqueos(self, barbero, fecha, hora_inicio, hora_fin):

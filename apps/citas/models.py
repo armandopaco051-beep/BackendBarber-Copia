@@ -1,4 +1,5 @@
 from django.db import models
+from django.utils import timezone
 
 from apps.seguridad.models import Usuario
 from apps.servicios.models import Servicio
@@ -159,3 +160,92 @@ class HistorialEstadoCita(models.Model):
 
     def __str__(self):
         return f"Cita {self.id_cita_id}: {self.estado_nuevo.nombre}"
+
+
+class Promocion(models.Model):
+    ESTADOS = (
+        ('ACTIVO', 'Activo'),
+        ('PROGRAMADA', 'Programada'),
+        ('INACTIVO', 'Inactivo'),
+    )
+
+    TIPOS_DESCUENTO = (
+        ('PORCENTAJE', 'Porcentaje'),
+        ('MONTO', 'Monto'),
+    )
+
+    id_promocion = models.AutoField(primary_key=True)
+    nombre = models.CharField(max_length=150)
+    descripcion = models.TextField(blank=True)
+    tipo_descuento = models.CharField(max_length=20, choices=TIPOS_DESCUENTO)
+    valor_descuento = models.DecimalField(max_digits=10, decimal_places=2)
+    fecha_inicio = models.DateField()
+    fecha_fin = models.DateField()
+    estado = models.CharField(max_length=20, choices=ESTADOS, default='PROGRAMADA')
+    fecha_registro = models.DateTimeField(auto_now_add=True)
+    fecha_actualizacion = models.DateTimeField(auto_now=True)
+    servicios = models.ManyToManyField(
+        Servicio,
+        through='DetallePromocion',
+        related_name='promociones',
+        blank=True,
+    )
+
+    class Meta:
+        db_table = '"agenda"."promocion"'
+        verbose_name = 'Promocion'
+        verbose_name_plural = 'Promociones'
+        ordering = ['-fecha_inicio', 'nombre']
+
+    def __str__(self):
+        return self.nombre
+
+    @property
+    def vigente_hoy(self):
+        hoy = timezone.localdate()
+        return self.estado == 'ACTIVO' and self.fecha_inicio <= hoy <= self.fecha_fin
+
+    @classmethod
+    def consultar(cls):
+        return cls.objects.prefetch_related('servicios').all()
+
+    def guardar(self):
+        self.save()
+        return self
+
+    def actualizar(self, **kwargs):
+        for attr, value in kwargs.items():
+            setattr(self, attr, value)
+        self.save()
+        return self
+
+    def cambiar_estado(self, estado):
+        self.estado = estado
+        self.save(update_fields=['estado', 'fecha_actualizacion'])
+        return self
+
+
+class DetallePromocion(models.Model):
+    id_detalle = models.AutoField(primary_key=True)
+    id_promocion = models.ForeignKey(
+        Promocion,
+        on_delete=models.CASCADE,
+        db_column='id_promocion',
+        related_name='detalles_servicios'
+    )
+    id_servicio = models.ForeignKey(
+        Servicio,
+        on_delete=models.CASCADE,
+        db_column='id_servicio',
+        related_name='detalles_promociones'
+    )
+
+    class Meta:
+        db_table = '"agenda"."detalle_promocion"'
+        verbose_name = 'Detalle de promocion'
+        verbose_name_plural = 'Detalles de promociones'
+        ordering = ['id_promocion', 'id_servicio']
+        unique_together = ('id_promocion', 'id_servicio')
+
+    def __str__(self):
+        return f"{self.id_promocion.nombre} - {self.id_servicio.nombre}"
