@@ -9,7 +9,7 @@ class Migration(migrations.Migration):
     initial = True
 
     dependencies = [
-        ('seguridad', '0003_rename_asistencia_column_in_postgresql'),
+        ('seguridad', '0001_initial'),
     ]
 
     operations = [
