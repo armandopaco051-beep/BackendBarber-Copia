@@ -3,13 +3,14 @@ from rest_framework import serializers
 
 from apps.seguridad.models import Usuario
 
-from .models import MetodoPago, PlanComision
+from .models import Caja, MetodoPago, MovimientoCaja, PlanComision
 
 
 # Serializers del paquete Ventas y Caja.
 # En este ciclo solo se implementan:
 # - CU13 MetodoPago
 # - CU14 PlanComision
+# - CU18 Caja
 
 
 class MetodoPagoSerializer(serializers.ModelSerializer):
@@ -130,4 +131,139 @@ class PlanComisionSerializer(serializers.ModelSerializer):
                     'codigo_barbero': 'Ya existe un plan de comision activo para ese barbero.'
                 })
 
+        return data
+
+
+class MovimientoCajaSerializer(serializers.ModelSerializer):
+    usuario_nombre = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = MovimientoCaja
+        fields = [
+            'id_movimiento_caja',
+            'caja',
+            'tipo',
+            'monto',
+            'descripcion',
+            'referencia',
+            'usuario',
+            'usuario_nombre',
+            'fecha',
+        ]
+        read_only_fields = ['fecha']
+
+    @extend_schema_field(serializers.CharField(allow_null=True))
+    def get_usuario_nombre(self, obj):
+        if not obj.usuario:
+            return None
+        return f"{obj.usuario.nombre} {obj.usuario.apellido}".strip()
+
+    def validate_tipo(self, value):
+        tipo = value.upper()
+        if tipo not in dict(MovimientoCaja.TIPOS_MOVIMIENTO):
+            raise serializers.ValidationError("Tipo de movimiento invalido.")
+        return tipo
+
+    def validate_monto(self, value):
+        if value <= 0:
+            raise serializers.ValidationError("El monto del movimiento debe ser mayor a 0.")
+        return value
+
+
+class CajaSerializer(serializers.ModelSerializer):
+    usuario_apertura_nombre = serializers.SerializerMethodField(read_only=True)
+    usuario_cierre_nombre = serializers.SerializerMethodField(read_only=True)
+    ingresos = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    egresos = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    saldo_actual = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    movimientos = MovimientoCajaSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Caja
+        fields = [
+            'id_caja',
+            'codigo_usuario_apertura',
+            'usuario_apertura_nombre',
+            'codigo_usuario_cierre',
+            'usuario_cierre_nombre',
+            'monto_apertura',
+            'monto_cierre',
+            'saldo_esperado',
+            'diferencia',
+            'justificacion_cierre',
+            'estado',
+            'fecha_apertura',
+            'fecha_cierre',
+            'fecha_actualizacion',
+            'ingresos',
+            'egresos',
+            'saldo_actual',
+            'movimientos',
+        ]
+        read_only_fields = [
+            'codigo_usuario_apertura',
+            'codigo_usuario_cierre',
+            'monto_cierre',
+            'saldo_esperado',
+            'diferencia',
+            'justificacion_cierre',
+            'estado',
+            'fecha_apertura',
+            'fecha_cierre',
+            'fecha_actualizacion',
+        ]
+
+    @extend_schema_field(serializers.CharField())
+    def get_usuario_apertura_nombre(self, obj):
+        if not obj.codigo_usuario_apertura:
+            return None
+        return f"{obj.codigo_usuario_apertura.nombre} {obj.codigo_usuario_apertura.apellido}".strip()
+
+    @extend_schema_field(serializers.CharField(allow_null=True))
+    def get_usuario_cierre_nombre(self, obj):
+        if not obj.codigo_usuario_cierre:
+            return None
+        return f"{obj.codigo_usuario_cierre.nombre} {obj.codigo_usuario_cierre.apellido}".strip()
+
+
+class CajaAperturaSerializer(serializers.Serializer):
+    monto_apertura = serializers.DecimalField(max_digits=12, decimal_places=2)
+
+    def validate_monto_apertura(self, value):
+        if value < 0:
+            raise serializers.ValidationError("El monto de apertura no puede ser negativo.")
+        return value
+
+    def validate(self, data):
+        if Caja.objects.filter(estado='ABIERTA').exists():
+            raise serializers.ValidationError("Ya existe una caja abierta.")
+        return data
+
+
+class CajaCierreSerializer(serializers.Serializer):
+    monto_cierre = serializers.DecimalField(max_digits=12, decimal_places=2)
+    justificacion_cierre = serializers.CharField(required=False, allow_blank=True)
+
+    def validate_monto_cierre(self, value):
+        if value < 0:
+            raise serializers.ValidationError("El monto de cierre no puede ser negativo.")
+        return value
+
+    def validate(self, data):
+        caja = self.context.get('caja')
+        if not caja:
+            raise serializers.ValidationError("No existe una caja abierta para cerrar.")
+        if caja.estado != 'ABIERTA':
+            raise serializers.ValidationError("La caja ya se encuentra cerrada.")
+
+        caja.recalcular_saldo_esperado()
+        monto_cierre = data.get('monto_cierre')
+        justificacion = (data.get('justificacion_cierre') or '').strip()
+
+        if monto_cierre < caja.saldo_esperado and not justificacion:
+            raise serializers.ValidationError({
+                'justificacion_cierre': 'Debe justificar cuando el monto de cierre es menor al saldo esperado.'
+            })
+
+        data['justificacion_cierre'] = justificacion
         return data

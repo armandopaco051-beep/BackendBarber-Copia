@@ -56,6 +56,10 @@ class Usuario(models.Model):
         return self.id_rol.nombre.lower() == 'barbero'
  
     @property
+    def es_cajero(self):
+        return self.id_rol.nombre.lower() == 'cajero'
+ 
+    @property
     def es_cliente(self):
         return self.id_rol.nombre.lower() == 'cliente'
 
