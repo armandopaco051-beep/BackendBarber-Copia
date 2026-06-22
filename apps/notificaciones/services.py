@@ -1,4 +1,9 @@
 import json
+import base64
+import hashlib
+import os
+import tempfile
+from pathlib import Path
 
 from django.conf import settings
 from django.db import transaction
@@ -7,6 +12,31 @@ from django.utils import timezone
 from apps.seguridad.models import Usuario
 
 from .models import Notificacion, NotificacionUsuario, PushSubscription
+
+
+def obtener_vapid_private_key():
+    private_key = getattr(settings, 'VAPID_PRIVATE_KEY', '')
+    if private_key and os.path.isfile(private_key):
+        return private_key
+
+    pem_base64 = getattr(settings, 'VAPID_PRIVATE_KEY_BASE64', '')
+    pem_text = getattr(settings, 'VAPID_PRIVATE_KEY_PEM', '') or private_key
+
+    if pem_base64:
+        try:
+            pem_bytes = base64.b64decode(pem_base64)
+        except Exception:
+            return ''
+    elif pem_text and 'BEGIN EC PRIVATE KEY' in pem_text:
+        pem_bytes = pem_text.replace('\\n', '\n').encode('utf-8')
+    else:
+        return private_key
+
+    digest = hashlib.sha256(pem_bytes).hexdigest()[:16]
+    key_path = Path(tempfile.gettempdir()) / f'vapid_{digest}.pem'
+    if not key_path.exists():
+        key_path.write_bytes(pem_bytes)
+    return str(key_path)
 
 
 def obtener_destinatarios(usuario_destino=None, rol_destino=''):
@@ -35,7 +65,7 @@ def enviar_push_suscripcion(suscripcion, notificacion):
     except ImportError:
         return False
 
-    private_key = getattr(settings, 'VAPID_PRIVATE_KEY', '')
+    private_key = obtener_vapid_private_key()
     subject = getattr(settings, 'VAPID_SUBJECT', '')
     if not private_key or not subject:
         return False
@@ -117,18 +147,25 @@ def enviar_notificacion_push(notificacion):
 
 
 def programar_envio_push(id_notificacion):
+    def enviar_directo():
+        notificacion = Notificacion.objects.filter(pk=id_notificacion).first()
+        if notificacion:
+            enviar_notificacion_push(notificacion)
+
     try:
         broker_url = getattr(settings, 'CELERY_BROKER_URL', '')
-        if broker_url.startswith('redis://'):
+        if not broker_url or not broker_url.startswith(('redis://', 'rediss://')):
+            enviar_directo()
+            return
+
+        if broker_url.startswith(('redis://', 'rediss://')):
             import redis
             redis.Redis.from_url(broker_url, socket_connect_timeout=1).ping()
 
         from .tasks import enviar_notificacion_push_task
         enviar_notificacion_push_task.delay(id_notificacion)
     except Exception:
-        notificacion = Notificacion.objects.filter(pk=id_notificacion).first()
-        if notificacion:
-            enviar_notificacion_push(notificacion)
+        enviar_directo()
 
 
 @transaction.atomic
