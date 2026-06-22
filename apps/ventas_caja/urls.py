@@ -6,10 +6,18 @@ from .views import (
     CajaConsultarView,
     CajaEstadoView,
     CajaHistorialView,
+    CajaResumenView,
     MetodoPagoDetalleView,
     MetodoPagoListCreateView,
+    MovimientoCajaAnularView,
+    MovimientoCajaDetalleView,
+    MovimientoCajaListCreateView,
     PlanComisionDetalleView,
     PlanComisionListCreateView,
+    VentaAnularView,
+    VentaConfirmarView,
+    VentaDetalleView,
+    VentaListCreateView,
 )
 
 
@@ -25,4 +33,12 @@ urlpatterns = [
     path('caja/consultar/', CajaConsultarView.as_view(), name='caja-consultar'),
     path('caja/historial/', CajaHistorialView.as_view(), name='caja-historial'),
     path('caja/cerrar/', CajaCerrarView.as_view(), name='caja-cerrar'),
+    path('caja/resumen/', CajaResumenView.as_view(), name='caja-resumen'),
+    path('caja/movimientos/', MovimientoCajaListCreateView.as_view(), name='movimiento-caja-list-create'),
+    path('caja/movimientos/<int:id_movimiento_caja>/', MovimientoCajaDetalleView.as_view(), name='movimiento-caja-detalle'),
+    path('caja/movimientos/<int:id_movimiento_caja>/anular/', MovimientoCajaAnularView.as_view(), name='movimiento-caja-anular'),
+    path('ventas/', VentaListCreateView.as_view(), name='venta-list-create'),
+    path('ventas/<int:id_venta>/', VentaDetalleView.as_view(), name='venta-detalle'),
+    path('ventas/<int:id_venta>/confirmar/', VentaConfirmarView.as_view(), name='venta-confirmar'),
+    path('ventas/<int:id_venta>/anular/', VentaAnularView.as_view(), name='venta-anular'),
 ]

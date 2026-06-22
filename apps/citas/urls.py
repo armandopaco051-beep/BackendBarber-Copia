@@ -3,6 +3,7 @@ from django.urls import path
 from .views import (
     BarberoServicioDetalleView,
     BarberoServicioListCreateView,
+    CitaAgregarServiciosView,
     CitaDetalleView,
     CitaListCreateView,
     DisponibilidadBarberoView,
@@ -43,6 +44,7 @@ urlpatterns = [
     path('barbero-servicios/<int:id_barbero_servicio>/', BarberoServicioDetalleView.as_view(), name='barbero-servicio-detalle'),
     path('citas/', CitaListCreateView.as_view(), name='cita-list-create'),
     path('citas/<int:id_cita>/', CitaDetalleView.as_view(), name='cita-detalle'),
+    path('citas/<int:id_cita>/servicios/', CitaAgregarServiciosView.as_view(), name='cita-agregar-servicios'),
     path('citas/<int:id_cita>/historial/', HistorialEstadoCitaListView.as_view(), name='cita-historial'),
     path('promociones/', PromocionListCreateView.as_view(), name='promocion-list-create'),
     path('promociones/<int:id_promocion>/', PromocionDetalleView.as_view(), name='promocion-detalle'),

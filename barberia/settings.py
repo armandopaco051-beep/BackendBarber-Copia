@@ -75,6 +75,8 @@ INSTALLED_APPS = [
      'apps.ventas_caja',
      # apps.reportes: preparado para reportes del sistema.
      'apps.reportes',
+     # apps.notificaciones: suscripciones push, historial y envios web push.
+     'apps.notificaciones',
   
   ]
 
@@ -173,6 +175,13 @@ EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'True').lower() == 'true'
 EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
 EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
 DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', EMAIL_HOST_USER or 'no-reply@blessedbarber.local')
+
+VAPID_SUBJECT = os.getenv('VAPID_SUBJECT', 'mailto:no-reply@blessedbarber.local')
+VAPID_PUBLIC_KEY = os.getenv('VAPID_PUBLIC_KEY', '')
+VAPID_PRIVATE_KEY = os.getenv('VAPID_PRIVATE_KEY', '')
+
+CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', 'redis://127.0.0.1:6379/0')
+CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', CELERY_BROKER_URL)
 
 # Internationalization
 # https://docs.djangoproject.com/en/6.0/topics/i18n/

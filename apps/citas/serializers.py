@@ -10,6 +10,7 @@ from apps.servicios.models import Servicio
 from .models import (
     BarberoServicio,
     Cita,
+    DetalleServicioCita,
     DetallePromocion,
     EstadoCita,
     HistorialEstadoCita,
@@ -54,6 +55,14 @@ def calcular_hora_fin(fecha, hora_inicio, duracion_minutos):
     return fin.time()
 
 
+def calcular_total_servicios(servicios):
+    return sum((servicio.precio for servicio in servicios), start=0)
+
+
+def calcular_duracion_servicios(servicios):
+    return sum((servicio.duracion_minutos for servicio in servicios), start=0)
+
+
 # Busca o crea el estado de cita en agenda.estado_cita.
 def obtener_estado_cita(nombre):
     estado, _ = EstadoCita.objects.get_or_create(nombre=normalizar_estado(nombre))
@@ -92,7 +101,8 @@ class BarberoServicioSerializer(serializers.ModelSerializer):
         queryset=Usuario.objects.select_related('id_rol').filter(id_rol__nombre__iexact='barbero')
     )
     id_servicio = serializers.PrimaryKeyRelatedField(
-        queryset=Servicio.objects.filter(estado='ACTIVO')
+        queryset=Servicio.objects.filter(estado='ACTIVO'),
+        required=False,
     )
     barbero = serializers.SerializerMethodField(read_only=True)
     servicio = serializers.CharField(source='id_servicio.nombre', read_only=True)
@@ -298,6 +308,25 @@ class PromocionSerializer(serializers.ModelSerializer):
         return instance
 
 
+class DetalleServicioCitaSerializer(serializers.ModelSerializer):
+    servicio = serializers.CharField(source='id_servicio.nombre', read_only=True)
+
+    class Meta:
+        model = DetalleServicioCita
+        fields = [
+            'id_detalle_cita',
+            'id_servicio',
+            'servicio',
+            'precio_unitario',
+            'duracion_minutos',
+            'subtotal',
+        ]
+
+
+class ServicioCitaInputSerializer(serializers.Serializer):
+    id_servicio = serializers.IntegerField()
+
+
 # Serializer principal del CU11.
 # Aqui vive la logica que evita citas invalidas o cruzadas.
 class CitaSerializer(serializers.ModelSerializer):
@@ -313,10 +342,14 @@ class CitaSerializer(serializers.ModelSerializer):
     cliente = serializers.SerializerMethodField(read_only=True)
     barbero = serializers.SerializerMethodField(read_only=True)
     servicio = serializers.CharField(source='id_servicio.nombre', read_only=True)
+    servicios = ServicioCitaInputSerializer(many=True, write_only=True, required=False)
+    servicios_detalle = DetalleServicioCitaSerializer(many=True, read_only=True)
     estado = serializers.CharField(required=False, write_only=True)
     estado_nombre = serializers.CharField(source='id_estadoc.nombre', read_only=True)
     hora_fin = serializers.TimeField(read_only=True)
     precio_base = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
+    subtotal_servicios = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
+    total_estimado = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     registrado_por = serializers.PrimaryKeyRelatedField(read_only=True)
 
     class Meta:
@@ -329,6 +362,8 @@ class CitaSerializer(serializers.ModelSerializer):
             'barbero',
             'id_servicio',
             'servicio',
+            'servicios',
+            'servicios_detalle',
             'fecha',
             'hora_inicio',
             'hora_fin',
@@ -337,6 +372,8 @@ class CitaSerializer(serializers.ModelSerializer):
             'observacion',
             'motivo_cancelacion',
             'precio_base',
+            'subtotal_servicios',
+            'total_estimado',
             'registrado_por',
             'fecha_registro',
             'fecha_actualizacion',
@@ -353,6 +390,7 @@ class CitaSerializer(serializers.ModelSerializer):
             'codigo_cliente': ['codigo_cliente', 'codigoCliente', 'cliente', 'id_cliente', 'idCliente'],
             'codigo_barbero': ['codigo_barbero', 'codigoBarbero', 'barbero', 'id_barbero', 'idBarbero'],
             'id_servicio': ['id_servicio', 'idServicio', 'servicio'],
+            'servicios': ['servicios'],
             'hora_inicio': ['hora_inicio', 'horaInicio', 'hora', 'hora_cita', 'horaCita'],
             'motivo_cancelacion': ['motivo_cancelacion', 'motivoCancelacion'],
         }
@@ -369,6 +407,40 @@ class CitaSerializer(serializers.ModelSerializer):
             data['fecha'] = normalizar_fecha_data(data.get('date'))
 
         return super().to_internal_value(data)
+
+    def _obtener_servicios_validados(self, data, instance=None):
+        servicios_data = data.pop('servicios', None)
+        servicio_principal = data.get('id_servicio', getattr(instance, 'id_servicio', None))
+
+        if servicios_data is None:
+            if instance and 'id_servicio' not in data:
+                servicios = [
+                    detalle.id_servicio
+                    for detalle in instance.servicios_detalle.select_related('id_servicio').all()
+                ]
+                if not servicios and servicio_principal:
+                    servicios = [servicio_principal]
+            else:
+                servicios = [servicio_principal] if servicio_principal else []
+        else:
+            ids_servicios = []
+            for item in servicios_data:
+                id_servicio = item.get('id_servicio') if isinstance(item, dict) else item
+                if id_servicio not in ids_servicios:
+                    ids_servicios.append(id_servicio)
+            servicios = list(Servicio.objects.filter(pk__in=ids_servicios, estado='ACTIVO'))
+            servicios_por_id = {servicio.pk: servicio for servicio in servicios}
+            faltantes = [id_servicio for id_servicio in ids_servicios if id_servicio not in servicios_por_id]
+            if faltantes:
+                raise serializers.ValidationError({'servicios': f'Servicios activos no encontrados: {faltantes}.'})
+            servicios = [servicios_por_id[id_servicio] for id_servicio in ids_servicios]
+
+        if not servicios:
+            raise serializers.ValidationError({'servicios': 'Debe seleccionar al menos un servicio.'})
+
+        data['id_servicio'] = servicios[0]
+        data['_servicios_cita'] = servicios
+        return servicios
 
     @extend_schema_field(serializers.CharField())
     def get_cliente(self, obj):
@@ -391,7 +463,8 @@ class CitaSerializer(serializers.ModelSerializer):
         instance = getattr(self, 'instance', None)
         cliente = data.get('codigo_cliente', getattr(instance, 'codigo_cliente', None))
         barbero = data.get('codigo_barbero', getattr(instance, 'codigo_barbero', None))
-        servicio = data.get('id_servicio', getattr(instance, 'id_servicio', None))
+        servicios = self._obtener_servicios_validados(data, instance)
+        servicio = servicios[0]
         fecha = data.get('fecha', getattr(instance, 'fecha', None))
         hora_inicio = data.get('hora_inicio', getattr(instance, 'hora_inicio', None))
         estado = data.get('estado', getattr(getattr(instance, 'id_estadoc', None), 'nombre', 'CONFIRMADA'))
@@ -400,22 +473,26 @@ class CitaSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"codigo_cliente": "El usuario seleccionado debe tener rol Cliente."})
         if not barbero or not barbero.es_barbero:
             raise serializers.ValidationError({"codigo_barbero": "El usuario seleccionado debe tener rol Barbero."})
-        if servicio.estado != 'ACTIVO':
-            raise serializers.ValidationError({"id_servicio": "El servicio seleccionado debe estar activo."})
-
         asignaciones_barbero = BarberoServicio.objects.filter(codigo_barbero=barbero)
-        if asignaciones_barbero.exists() and not asignaciones_barbero.filter(
-            id_servicio=servicio,
-            estado='ACTIVO',
-        ).exists():
-            raise serializers.ValidationError({
-                "id_servicio": "El servicio seleccionado no esta habilitado para el barbero elegido."
-            })
+        if asignaciones_barbero.exists():
+            servicios_no_habilitados = [
+                servicio_item.nombre
+                for servicio_item in servicios
+                if not asignaciones_barbero.filter(id_servicio=servicio_item, estado='ACTIVO').exists()
+            ]
+            if servicios_no_habilitados:
+                raise serializers.ValidationError({
+                    "servicios": f"El barbero no esta habilitado para: {', '.join(servicios_no_habilitados)}."
+                })
 
-        hora_fin = calcular_hora_fin(fecha, hora_inicio, servicio.duracion_minutos)
+        duracion_total = calcular_duracion_servicios(servicios)
+        subtotal_servicios = calcular_total_servicios(servicios)
+        hora_fin = calcular_hora_fin(fecha, hora_inicio, duracion_total)
         # hora_fin y precio_base se calculan en backend, no los envia el frontend.
         data['hora_fin'] = hora_fin
         data['precio_base'] = servicio.precio
+        data['subtotal_servicios'] = subtotal_servicios
+        data['total_estimado'] = subtotal_servicios
 
         if estado in ESTADOS_NO_BLOQUEAN_HORARIO:
             return data
@@ -481,6 +558,7 @@ class CitaSerializer(serializers.ModelSerializer):
     @transaction.atomic
     def create(self, validated_data):
         # Crea la cita, asigna estado, registra usuario creador y crea historial inicial.
+        servicios = validated_data.pop('_servicios_cita')
         estado_nombre = validated_data.pop('estado', 'CONFIRMADA')
         estado = obtener_estado_cita(estado_nombre)
         request = self.context.get('request')
@@ -497,11 +575,13 @@ class CitaSerializer(serializers.ModelSerializer):
             observacion='Cita registrada',
             cambiado_por=usuario_actual,
         )
+        self._actualizar_servicios_cita(cita, servicios)
         return cita
 
     @transaction.atomic
     def update(self, instance, validated_data):
         # Actualiza la cita y, si cambia el estado, guarda el historial del cambio.
+        servicios = validated_data.pop('_servicios_cita', None)
         estado_nombre = validated_data.pop('estado', None)
         estado_anterior = instance.id_estadoc
 
@@ -512,6 +592,9 @@ class CitaSerializer(serializers.ModelSerializer):
             instance.id_estadoc = obtener_estado_cita(estado_nombre)
 
         instance.save()
+
+        if servicios is not None:
+            self._actualizar_servicios_cita(instance, servicios)
 
         estado_anterior_id = getattr(estado_anterior, 'id_estado', None)
         if estado_nombre and estado_anterior_id and estado_anterior_id != instance.id_estadoc_id:
@@ -526,3 +609,16 @@ class CitaSerializer(serializers.ModelSerializer):
             )
 
         return instance
+
+    def _actualizar_servicios_cita(self, cita, servicios):
+        DetalleServicioCita.objects.filter(id_cita=cita).delete()
+        DetalleServicioCita.objects.bulk_create([
+            DetalleServicioCita(
+                id_cita=cita,
+                id_servicio=servicio,
+                precio_unitario=servicio.precio,
+                duracion_minutos=servicio.duracion_minutos,
+                subtotal=servicio.precio,
+            )
+            for servicio in servicios
+        ])

@@ -156,6 +156,8 @@ class MovimientoInventario(models.Model):
         ('AJUSTE', 'Ajuste'),
         ('ACTIVACION', 'Activacion'),
         ('DESACTIVACION', 'Desactivacion'),
+        ('SALIDA_VENTA', 'Salida por venta'),
+        ('DEVOLUCION', 'Devolucion'),
     )
 
     id_movimiento = models.AutoField(primary_key=True)
@@ -177,7 +179,17 @@ class MovimientoInventario(models.Model):
     )
     tipo_movimiento = models.CharField(max_length=20, choices=TIPOS_MOVIMIENTO)
     cantidad = models.PositiveIntegerField(default=0)
+    stock_anterior = models.PositiveIntegerField(null=True, blank=True)
+    stock_nuevo = models.PositiveIntegerField(null=True, blank=True)
     motivo = models.TextField(blank=True)
+    id_venta = models.ForeignKey(
+        'ventas_caja.Venta',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_column='id_venta',
+        related_name='movimientos_inventario'
+    )
     fecha = models.DateTimeField(auto_now_add=True)
     usuario = models.ForeignKey(
         Usuario,

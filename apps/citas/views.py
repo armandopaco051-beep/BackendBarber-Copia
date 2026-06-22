@@ -72,6 +72,10 @@ def barbero_habilitado_para_servicio(barbero, servicio):
     return asignaciones.filter(id_servicio=servicio, estado='ACTIVO').exists()
 
 
+def barbero_habilitado_para_servicios(barbero, servicios):
+    return all(barbero_habilitado_para_servicio(barbero, servicio) for servicio in servicios)
+
+
 def consultar_horarios_barbero(barbero, fecha):
     dia_semana = DIAS_SEMANA[fecha.weekday()]
     return HorarioLaboral.objects.filter(
@@ -110,12 +114,13 @@ def generar_bloques_horario(fecha, horario, duracion_minutos):
         inicio += paso
 
 
-def calcular_disponibilidad_barbero(barbero, servicio, fecha):
-    if servicio.duracion_minutos <= 0:
+def calcular_disponibilidad_barbero(barbero, servicios, fecha):
+    duracion_total = sum(servicio.duracion_minutos for servicio in servicios)
+    if duracion_total <= 0:
         return {'disponibles': [], 'mensaje': 'El servicio no tiene una duracion valida.'}
 
-    if not barbero_habilitado_para_servicio(barbero, servicio):
-        return {'disponibles': [], 'mensaje': 'El barbero seleccionado no tiene habilitado ese servicio.'}
+    if not barbero_habilitado_para_servicios(barbero, servicios):
+        return {'disponibles': [], 'mensaje': 'El barbero seleccionado no tiene habilitados todos los servicios.'}
 
     asistencia = consultar_asistencia_barbero(barbero, fecha)
     estado_asistencia = str(getattr(asistencia, 'estado', '')).upper()
@@ -131,7 +136,7 @@ def calcular_disponibilidad_barbero(barbero, servicio, fecha):
     disponibles = []
 
     for horario in horarios:
-        for hora_inicio, hora_fin in generar_bloques_horario(fecha, horario, servicio.duracion_minutos):
+        for hora_inicio, hora_fin in generar_bloques_horario(fecha, horario, duracion_total):
             cruza_descanso = False
             if horario.hora_inicio_descanso and horario.hora_fin_descanso:
                 cruza_descanso = cruza_intervalo(
@@ -302,7 +307,7 @@ class CitaListCreateView(APIView):
             'id_servicio',
             'id_estadoc',
             'registrado_por',
-        ).all()
+        ).prefetch_related('servicios_detalle__id_servicio').all()
 
         fecha = request.query_params.get('fecha')
         codigo_barbero = request.query_params.get('codigo_barbero')
@@ -334,7 +339,8 @@ class CitaListCreateView(APIView):
                 value={
                     "codigo_cliente": "CLIE001",
                     "codigo_barbero": "BARB001",
-                    "id_servicio": 1,
+            "id_servicio": 1,
+                    "servicios": [{"id_servicio": 1}, {"id_servicio": 2}],
                     "fecha": "2026-05-15",
                     "hora_inicio": "10:00:00",
                     "estado": "CONFIRMADA",
@@ -374,7 +380,7 @@ class CitaDetalleView(APIView):
                 'id_servicio',
                 'id_estadoc',
                 'registrado_por',
-            ).get(pk=id_cita)
+            ).prefetch_related('servicios_detalle__id_servicio').get(pk=id_cita)
         except Cita.DoesNotExist:
             return None
 
@@ -425,6 +431,97 @@ class CitaDetalleView(APIView):
             serializer.save()
             registrar_bitacora(request, 'ANULAR_CITA', f'Cita anulada: {cita.id_cita}.')
             return Response({'mensaje': 'Cita anulada correctamente.'}, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@extend_schema(tags=["CU11 - Gestionar Citas"])
+class CitaAgregarServiciosView(APIView):
+    permission_classes = [EsAdmin]
+
+    def _get_cita(self, id_cita):
+        try:
+            return Cita.objects.select_related(
+                'codigo_cliente',
+                'codigo_cliente__id_rol',
+                'codigo_barbero',
+                'codigo_barbero__id_rol',
+                'id_servicio',
+                'id_estadoc',
+                'registrado_por',
+            ).prefetch_related('servicios_detalle__id_servicio').get(pk=id_cita)
+        except Cita.DoesNotExist:
+            return None
+
+    @extend_schema(
+        summary="Agregar servicios a una cita",
+        description="Agrega servicios adicionales a una cita no cobrada. Recalcula duracion, hora fin y total estimado.",
+        request={
+            "application/json": {
+                "type": "object",
+                "properties": {
+                    "servicios": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {"id_servicio": {"type": "integer"}},
+                            "required": ["id_servicio"],
+                        },
+                    }
+                },
+                "required": ["servicios"],
+            }
+        },
+        responses={
+            200: CitaSerializer,
+            400: OpenApiResponse(description="Datos invalidos o cita ya cobrada."),
+            404: OpenApiResponse(description="Cita no encontrada."),
+        },
+        examples=[
+            OpenApiExample(
+                "Agregar servicios",
+                value={"servicios": [{"id_servicio": 2}, {"id_servicio": 3}]},
+                request_only=True,
+            )
+        ]
+    )
+    def post(self, request, id_cita):
+        cita = self._get_cita(id_cita)
+        if not cita:
+            return Response({'error': 'Cita no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+
+        from apps.ventas_caja.models import Venta
+
+        if Venta.objects.filter(id_cita=cita, estado='PAGADA').exists():
+            return Response(
+                {'error': 'No se pueden agregar servicios a una cita que ya fue cobrada.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        servicios_nuevos = request.data.get('servicios') or []
+        if not servicios_nuevos:
+            return Response({'servicios': 'Debe enviar al menos un servicio.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        ids_actuales = [
+            detalle.id_servicio_id
+            for detalle in cita.servicios_detalle.all()
+        ] or [cita.id_servicio_id]
+        ids_finales = list(dict.fromkeys(ids_actuales + [
+            item.get('id_servicio') for item in servicios_nuevos if item.get('id_servicio')
+        ]))
+
+        serializer = CitaSerializer(
+            cita,
+            data={'servicios': [{'id_servicio': id_servicio} for id_servicio in ids_finales]},
+            partial=True,
+            context={'request': request},
+        )
+        if serializer.is_valid():
+            cita = serializer.save()
+            registrar_bitacora(request, 'AGREGAR_SERVICIOS_CITA', f'Servicios agregados a cita: {cita.id_cita}.')
+            return Response(
+                {'mensaje': 'Servicios agregados correctamente.', 'cita': CitaSerializer(cita).data},
+                status=status.HTTP_200_OK
+            )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -525,9 +622,16 @@ class PromocionDetalleView(APIView):
         promocion = self._get_promocion(id_promocion)
         if not promocion:
             return Response({'error': 'Promocion no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        estado_anterior = promocion.estado
         serializer = PromocionSerializer(promocion, data=request.data, partial=True)
         if serializer.is_valid():
             promocion = serializer.save()
+            if estado_anterior != 'ACTIVO' and promocion.estado == 'ACTIVO':
+                try:
+                    from apps.notificaciones.services import notificar_promocion_activada
+                    notificar_promocion_activada(promocion)
+                except Exception:
+                    pass
             registrar_bitacora(request, 'ACTUALIZAR_PROMOCION', f'Promocion actualizada: {promocion.id_promocion}.')
             return Response(
                 {'mensaje': 'Promocion actualizada correctamente.', 'promocion': PromocionSerializer(promocion).data},
@@ -559,7 +663,8 @@ class DisponibilidadBarberoView(APIView):
         summary="Consultar horarios disponibles",
         parameters=[
             OpenApiParameter(name='codigo_barbero', required=False, type=str),
-            OpenApiParameter(name='id_servicio', required=True, type=int),
+            OpenApiParameter(name='id_servicio', required=False, type=int),
+            OpenApiParameter(name='id_servicios', required=False, type=str),
             OpenApiParameter(name='fecha', required=True, type=str),
         ],
         responses={200: OpenApiResponse(description="Horarios disponibles.")}
@@ -580,26 +685,36 @@ class DisponibilidadBarberoView(APIView):
             'idServicio',
             'servicio',
         )
+        id_servicios = obtener_query_param(request.query_params, 'id_servicios', 'idServicios', 'servicios')
         fecha_valor = obtener_query_param(request.query_params, 'fecha', 'date')
         fecha = parsear_fecha_frontend(fecha_valor)
 
-        if not id_servicio or not fecha:
+        if not (id_servicio or id_servicios) or not fecha:
             return Response(
                 {
-                    'error': 'Debe enviar id_servicio y fecha. codigo_barbero es opcional.',
+                    'error': 'Debe enviar id_servicio o id_servicios, y fecha. codigo_barbero es opcional.',
                     'recibido': {
                         'codigo_barbero': codigo_barbero,
                         'id_servicio': id_servicio,
+                        'id_servicios': id_servicios,
                         'fecha': fecha_valor,
                     }
                 },
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        servicio = Servicio.objects.filter(pk=id_servicio, estado='ACTIVO').first()
+        ids_servicios = []
+        if id_servicios:
+            ids_servicios = [valor.strip() for valor in str(id_servicios).split(',') if valor.strip()]
+        elif id_servicio:
+            ids_servicios = [id_servicio]
 
-        if not servicio:
-            return Response({'error': 'Servicio activo no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+        servicios = list(Servicio.objects.filter(pk__in=ids_servicios, estado='ACTIVO'))
+        servicios_por_id = {str(servicio.pk): servicio for servicio in servicios}
+        servicios = [servicios_por_id[str(id_item)] for id_item in ids_servicios if str(id_item) in servicios_por_id]
+
+        if len(servicios) != len(ids_servicios):
+            return Response({'error': 'Uno o mas servicios activos no fueron encontrados.'}, status=status.HTTP_404_NOT_FOUND)
 
         if es_modo_todos_barberos(codigo_barbero):
             barberos = Usuario.objects.select_related('id_rol').filter(
@@ -608,7 +723,7 @@ class DisponibilidadBarberoView(APIView):
 
             disponibilidad_por_barbero = []
             for barbero in barberos:
-                resultado = calcular_disponibilidad_barbero(barbero, servicio, fecha)
+                resultado = calcular_disponibilidad_barbero(barbero, servicios, fecha)
                 if resultado['disponibles']:
                     disponibilidad_por_barbero.append({
                         'codigo_barbero': barbero.codigo,
@@ -620,8 +735,9 @@ class DisponibilidadBarberoView(APIView):
             return Response(
                 {
                     'fecha': fecha.isoformat(),
-                    'id_servicio': servicio.id_servicio,
-                    'servicio': servicio.nombre,
+                    'servicios': [{'id_servicio': servicio.id_servicio, 'nombre': servicio.nombre, 'precio': servicio.precio} for servicio in servicios],
+                    'duracion_total_minutos': sum(servicio.duracion_minutos for servicio in servicios),
+                    'total_estimado': sum((servicio.precio for servicio in servicios), start=0),
                     'barberos': disponibilidad_por_barbero,
                     'mensaje': mensaje,
                 },
@@ -635,5 +751,10 @@ class DisponibilidadBarberoView(APIView):
         if not barbero:
             return Response({'error': 'Barbero no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
 
-        resultado = calcular_disponibilidad_barbero(barbero, servicio, fecha)
+        resultado = calcular_disponibilidad_barbero(barbero, servicios, fecha)
+        resultado.update({
+            'servicios': [{'id_servicio': servicio.id_servicio, 'nombre': servicio.nombre, 'precio': servicio.precio} for servicio in servicios],
+            'duracion_total_minutos': sum(servicio.duracion_minutos for servicio in servicios),
+            'total_estimado': sum((servicio.precio for servicio in servicios), start=0),
+        })
         return Response(resultado, status=status.HTTP_200_OK)

@@ -94,6 +94,8 @@ class Cita(models.Model):
     observacion = models.TextField(blank=True)
     motivo_cancelacion = models.TextField(blank=True)
     precio_base = models.DecimalField(max_digits=10, decimal_places=2)
+    subtotal_servicios = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    total_estimado = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     registrado_por = models.ForeignKey(
         # Usuario administrador que registro la cita.
         Usuario,
@@ -114,6 +116,34 @@ class Cita(models.Model):
 
     def __str__(self):
         return f"{self.fecha} {self.hora_inicio} - {self.codigo_cliente.codigo}"
+
+
+class DetalleServicioCita(models.Model):
+    id_detalle_cita = models.AutoField(primary_key=True)
+    id_cita = models.ForeignKey(
+        Cita,
+        on_delete=models.CASCADE,
+        db_column='id_cita',
+        related_name='servicios_detalle'
+    )
+    id_servicio = models.ForeignKey(
+        Servicio,
+        on_delete=models.PROTECT,
+        db_column='id_servicio',
+        related_name='detalles_cita'
+    )
+    precio_unitario = models.DecimalField(max_digits=10, decimal_places=2)
+    duracion_minutos = models.PositiveIntegerField()
+    subtotal = models.DecimalField(max_digits=10, decimal_places=2)
+
+    class Meta:
+        db_table = '"agenda"."detalle_servicio_cita"'
+        verbose_name = 'Detalle de servicio de cita'
+        verbose_name_plural = 'Detalles de servicios de cita'
+        ordering = ['id_detalle_cita']
+
+    def __str__(self):
+        return f"Cita {self.id_cita_id} - {self.id_servicio.nombre}"
 
 
 # Historial de cambios de estado de una cita.

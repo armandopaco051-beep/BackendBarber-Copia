@@ -1,6 +1,7 @@
 from drf_spectacular.utils import extend_schema, OpenApiExample, OpenApiResponse
 from django.db import transaction
 from django.db.models import Q
+from rest_framework.exceptions import ValidationError
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -8,13 +9,28 @@ from rest_framework.views import APIView
 from apps.seguridad.permissions import EsAdmin, EsAdminOCajero
 from apps.seguridad.views import registrar_bitacora
 
-from .models import Caja, MetodoPago, PlanComision
+from .models import Caja, MetodoPago, MovimientoCaja, PlanComision, Venta
 from .serializers import (
     CajaAperturaSerializer,
     CajaCierreSerializer,
     CajaSerializer,
     MetodoPagoSerializer,
+    MovimientoCajaAnularSerializer,
+    MovimientoCajaCrearSerializer,
+    MovimientoCajaSerializer,
     PlanComisionSerializer,
+    VentaAnularSerializer,
+    VentaConfirmarSerializer,
+    VentaCrearSerializer,
+    VentaSerializer,
+)
+from .services import (
+    anular_movimiento_caja,
+    anular_venta,
+    confirmar_venta,
+    crear_venta_borrador,
+    registrar_movimiento_caja_manual,
+    resumen_caja_abierta,
 )
 
 
@@ -452,5 +468,351 @@ class CajaCerrarView(APIView):
 
         return Response(
             {'mensaje': 'Caja cerrada correctamente.', 'caja': CajaSerializer(caja).data},
+            status=status.HTTP_200_OK
+        )
+
+
+@extend_schema(tags=["CU20 - Gestionar Movimientos de Caja"])
+class MovimientoCajaListCreateView(APIView):
+    permission_classes = [EsAdminOCajero]
+    serializer_class = MovimientoCajaSerializer
+
+    @extend_schema(
+        summary="Listar movimientos de la caja abierta",
+        responses={200: MovimientoCajaSerializer(many=True)}
+    )
+    def get(self, request):
+        caja = Caja.caja_abierta()
+        if not caja:
+            return Response({'error': 'No existe una caja abierta.'}, status=status.HTTP_404_NOT_FOUND)
+
+        movimientos = MovimientoCaja.consultar().filter(caja=caja)
+        tipo_movimiento = request.query_params.get('tipo_movimiento')
+        estado_filtro = request.query_params.get('estado')
+        metodo_pago = request.query_params.get('id_metodo_pago')
+
+        if tipo_movimiento:
+            movimientos = movimientos.filter(tipo_movimiento=tipo_movimiento.upper())
+        if estado_filtro:
+            movimientos = movimientos.filter(estado=estado_filtro.upper())
+        if metodo_pago:
+            movimientos = movimientos.filter(id_metodo_pago_id=metodo_pago)
+
+        registrar_bitacora(request, 'CONSULTAR_MOVIMIENTOS_CAJA', f'Consulta de movimientos de caja: {caja.id_caja}.')
+        return Response(
+            {
+                'caja': caja.id_caja,
+                'movimientos': MovimientoCajaSerializer(movimientos, many=True).data,
+            },
+            status=status.HTTP_200_OK
+        )
+
+    @extend_schema(
+        summary="Registrar movimiento manual de caja",
+        request=MovimientoCajaCrearSerializer,
+        responses={
+            201: MovimientoCajaSerializer,
+            400: OpenApiResponse(description="Datos invalidos."),
+            404: OpenApiResponse(description="No existe una caja abierta."),
+        },
+        examples=[
+            OpenApiExample(
+                "Registrar egreso",
+                value={
+                    "tipo_movimiento": "EGRESO",
+                    "id_metodo_pago": 1,
+                    "monto": "50.00",
+                    "descripcion": "Compra de cuchillas",
+                    "referencia": "RECIBO-001",
+                },
+                request_only=True,
+            )
+        ]
+    )
+    def post(self, request):
+        serializer = MovimientoCajaCrearSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        usuario = getattr(request, 'usuario_actual', None)
+        try:
+            movimiento = registrar_movimiento_caja_manual(serializer.validated_data, usuario)
+            registrar_bitacora(request, 'CREAR_MOVIMIENTO_CAJA', f'Movimiento de caja creado: {movimiento.id_movimiento_caja}.')
+        except ValidationError as exc:
+            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {
+                'mensaje': 'Movimiento de caja registrado correctamente.',
+                'movimiento': MovimientoCajaSerializer(movimiento).data,
+                'caja': CajaSerializer(movimiento.caja).data,
+            },
+            status=status.HTTP_201_CREATED
+        )
+
+
+@extend_schema(tags=["CU20 - Gestionar Movimientos de Caja"])
+class MovimientoCajaDetalleView(APIView):
+    permission_classes = [EsAdminOCajero]
+    serializer_class = MovimientoCajaSerializer
+
+    def _get_movimiento(self, id_movimiento_caja):
+        try:
+            return MovimientoCaja.consultar().get(pk=id_movimiento_caja)
+        except MovimientoCaja.DoesNotExist:
+            return None
+
+    @extend_schema(
+        summary="Ver detalle de movimiento de caja",
+        responses={200: MovimientoCajaSerializer, 404: OpenApiResponse(description="No encontrado.")}
+    )
+    def get(self, request, id_movimiento_caja):
+        movimiento = self._get_movimiento(id_movimiento_caja)
+        if not movimiento:
+            return Response({'error': 'Movimiento de caja no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(MovimientoCajaSerializer(movimiento).data, status=status.HTTP_200_OK)
+
+
+@extend_schema(tags=["CU20 - Gestionar Movimientos de Caja"])
+class MovimientoCajaAnularView(APIView):
+    permission_classes = [EsAdminOCajero]
+    serializer_class = MovimientoCajaAnularSerializer
+
+    @extend_schema(
+        summary="Anular movimiento manual de caja",
+        request=MovimientoCajaAnularSerializer,
+        responses={
+            200: MovimientoCajaSerializer,
+            400: OpenApiResponse(description="Datos invalidos."),
+            404: OpenApiResponse(description="No encontrado."),
+        }
+    )
+    def post(self, request, id_movimiento_caja):
+        serializer = MovimientoCajaAnularSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        usuario = getattr(request, 'usuario_actual', None)
+        try:
+            movimiento = anular_movimiento_caja(id_movimiento_caja, serializer.validated_data['motivo'], usuario)
+            registrar_bitacora(request, 'ANULAR_MOVIMIENTO_CAJA', f'Movimiento de caja anulado: {movimiento.id_movimiento_caja}.')
+        except MovimientoCaja.DoesNotExist:
+            return Response({'error': 'Movimiento de caja no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+        except ValidationError as exc:
+            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {
+                'mensaje': 'Movimiento de caja anulado correctamente.',
+                'movimiento': MovimientoCajaSerializer(movimiento).data,
+                'caja': CajaSerializer(movimiento.caja).data,
+            },
+            status=status.HTTP_200_OK
+        )
+
+
+@extend_schema(tags=["CU20 - Gestionar Movimientos de Caja"])
+class CajaResumenView(APIView):
+    permission_classes = [EsAdminOCajero]
+
+    @extend_schema(
+        summary="Consultar resumen de caja abierta",
+        responses={200: OpenApiResponse(description="Resumen de caja abierta.")}
+    )
+    def get(self, request):
+        try:
+            resumen = resumen_caja_abierta()
+        except ValidationError as exc:
+            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+
+        registrar_bitacora(request, 'CONSULTAR_RESUMEN_CAJA', f"Consulta de resumen de caja: {resumen['caja_id']}.")
+        return Response({'resumen': resumen}, status=status.HTTP_200_OK)
+
+
+@extend_schema(tags=["CU19 - Gestionar Ventas"])
+class VentaListCreateView(APIView):
+    permission_classes = [EsAdminOCajero]
+    serializer_class = VentaSerializer
+
+    @extend_schema(
+        summary="Listar ventas",
+        responses={200: VentaSerializer(many=True)}
+    )
+    def get(self, request):
+        ventas = Venta.consultar()
+        estado_filtro = request.query_params.get('estado')
+        cliente = request.query_params.get('cliente')
+        fecha = request.query_params.get('fecha')
+
+        if estado_filtro:
+            ventas = ventas.filter(estado=estado_filtro.upper())
+        if cliente:
+            ventas = ventas.filter(
+                Q(codigo_cliente__codigo__icontains=cliente)
+                | Q(codigo_cliente__nombre__icontains=cliente)
+                | Q(codigo_cliente__apellido__icontains=cliente)
+            )
+        if fecha:
+            ventas = ventas.filter(fecha_registro__date=fecha)
+
+        registrar_bitacora(request, 'CONSULTAR_VENTAS', 'Consulta de ventas.')
+        return Response(VentaSerializer(ventas, many=True).data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        summary="Crear venta en borrador",
+        request=VentaCrearSerializer,
+        responses={
+            201: VentaSerializer,
+            400: OpenApiResponse(description="Datos invalidos."),
+        },
+        examples=[
+            OpenApiExample(
+                "Crear venta",
+                value={
+                    "codigo_cliente": "CLI001",
+                    "descuento": "0.00",
+                    "observacion": "Venta directa",
+                    "detalles": [
+                        {
+                            "tipo_item": "PRODUCTO",
+                            "id_producto": 1,
+                            "cantidad": 2,
+                            "descuento": "0.00"
+                        },
+                        {
+                            "tipo_item": "SERVICIO",
+                            "id_servicio": 1,
+                            "codigo_barbero": "BARB001",
+                            "cantidad": 1,
+                            "descuento": "0.00"
+                        }
+                    ]
+                },
+                request_only=True,
+            )
+        ]
+    )
+    def post(self, request):
+        serializer = VentaCrearSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        usuario = getattr(request, 'usuario_actual', None)
+        try:
+            venta = crear_venta_borrador(serializer.validated_data, usuario)
+            registrar_bitacora(request, 'CREAR_VENTA', f'Venta creada en borrador: {venta.id_venta}.')
+        except ValidationError as exc:
+            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {
+                'mensaje': 'Venta creada en borrador correctamente.',
+                'venta': VentaSerializer(venta).data,
+            },
+            status=status.HTTP_201_CREATED
+        )
+
+
+@extend_schema(tags=["CU19 - Gestionar Ventas"])
+class VentaDetalleView(APIView):
+    permission_classes = [EsAdminOCajero]
+    serializer_class = VentaSerializer
+
+    def _get_venta(self, id_venta):
+        try:
+            return Venta.consultar().get(pk=id_venta)
+        except Venta.DoesNotExist:
+            return None
+
+    @extend_schema(
+        summary="Ver detalle de venta",
+        responses={200: VentaSerializer, 404: OpenApiResponse(description="No encontrado.")}
+    )
+    def get(self, request, id_venta):
+        venta = self._get_venta(id_venta)
+        if not venta:
+            return Response({'error': 'Venta no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(VentaSerializer(venta).data, status=status.HTTP_200_OK)
+
+
+@extend_schema(tags=["CU19 - Gestionar Ventas"])
+class VentaConfirmarView(APIView):
+    permission_classes = [EsAdminOCajero]
+    serializer_class = VentaConfirmarSerializer
+
+    @extend_schema(
+        summary="Confirmar venta",
+        request=VentaConfirmarSerializer,
+        responses={
+            200: VentaSerializer,
+            400: OpenApiResponse(description="Datos invalidos."),
+            404: OpenApiResponse(description="No encontrado."),
+        },
+        examples=[
+            OpenApiExample(
+                "Confirmar venta",
+                value={
+                    "pagos": [
+                        {
+                            "id_metodo_pago": 1,
+                            "monto": "75.00",
+                            "referencia": ""
+                        }
+                    ]
+                },
+                request_only=True,
+            )
+        ]
+    )
+    def post(self, request, id_venta):
+        serializer = VentaConfirmarSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        usuario = getattr(request, 'usuario_actual', None)
+        try:
+            venta = confirmar_venta(id_venta, serializer.validated_data['pagos'], usuario)
+            registrar_bitacora(request, 'CONFIRMAR_VENTA', f'Venta confirmada: {venta.id_venta}.')
+        except Venta.DoesNotExist:
+            return Response({'error': 'Venta no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        except ValidationError as exc:
+            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {'mensaje': 'Venta confirmada correctamente.', 'venta': VentaSerializer(venta).data},
+            status=status.HTTP_200_OK
+        )
+
+
+@extend_schema(tags=["CU19 - Gestionar Ventas"])
+class VentaAnularView(APIView):
+    permission_classes = [EsAdminOCajero]
+    serializer_class = VentaAnularSerializer
+
+    @extend_schema(
+        summary="Anular venta",
+        request=VentaAnularSerializer,
+        responses={
+            200: VentaSerializer,
+            400: OpenApiResponse(description="Datos invalidos."),
+            404: OpenApiResponse(description="No encontrado."),
+        }
+    )
+    def post(self, request, id_venta):
+        serializer = VentaAnularSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        usuario = getattr(request, 'usuario_actual', None)
+        try:
+            venta = anular_venta(id_venta, serializer.validated_data['motivo'], usuario)
+            registrar_bitacora(request, 'ANULAR_VENTA', f'Venta anulada: {venta.id_venta}.')
+        except Venta.DoesNotExist:
+            return Response({'error': 'Venta no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        except ValidationError as exc:
+            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {'mensaje': 'Venta anulada correctamente.', 'venta': VentaSerializer(venta).data},
             status=status.HTTP_200_OK
         )

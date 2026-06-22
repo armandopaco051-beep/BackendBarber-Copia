@@ -622,6 +622,11 @@ class BarberoListCreateView(APIView):
         serializer = BarberoCrearSerializer(data=request.data)
         if serializer.is_valid():
             barbero = serializer.save(id_rol=rol_barbero)
+            try:
+                from apps.notificaciones.services import notificar_nuevo_barbero
+                notificar_nuevo_barbero(barbero)
+            except Exception:
+                pass
             registrar_bitacora(request, 'CREAR_BARBERO', f'Barbero registrado: {barbero.codigo}.')
             return Response(
                 {'mensaje': 'Barbero registrado correctamente.', 'barbero': BarberoSerializer(barbero).data},

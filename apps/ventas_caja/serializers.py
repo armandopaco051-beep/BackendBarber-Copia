@@ -3,7 +3,16 @@ from rest_framework import serializers
 
 from apps.seguridad.models import Usuario
 
-from .models import Caja, MetodoPago, MovimientoCaja, PlanComision
+from .models import (
+    Caja,
+    ComisionVenta,
+    DetalleVenta,
+    MetodoPago,
+    MovimientoCaja,
+    PagoVenta,
+    PlanComision,
+    Venta,
+)
 
 
 # Serializers del paquete Ventas y Caja.
@@ -136,6 +145,7 @@ class PlanComisionSerializer(serializers.ModelSerializer):
 
 class MovimientoCajaSerializer(serializers.ModelSerializer):
     usuario_nombre = serializers.SerializerMethodField(read_only=True)
+    metodo_pago_nombre = serializers.CharField(source='id_metodo_pago.nombre', read_only=True, allow_null=True)
 
     class Meta:
         model = MovimientoCaja
@@ -143,9 +153,17 @@ class MovimientoCajaSerializer(serializers.ModelSerializer):
             'id_movimiento_caja',
             'caja',
             'tipo',
+            'tipo_movimiento',
+            'naturaleza',
+            'id_metodo_pago',
+            'metodo_pago_nombre',
+            'id_venta',
+            'id_pago_venta',
             'monto',
             'descripcion',
             'referencia',
+            'estado',
+            'motivo_anulacion',
             'usuario',
             'usuario_nombre',
             'fecha',
@@ -176,6 +194,7 @@ class CajaSerializer(serializers.ModelSerializer):
     ingresos = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     egresos = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     saldo_actual = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    saldo_efectivo = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
     movimientos = MovimientoCajaSerializer(many=True, read_only=True)
 
     class Meta:
@@ -198,6 +217,7 @@ class CajaSerializer(serializers.ModelSerializer):
             'ingresos',
             'egresos',
             'saldo_actual',
+            'saldo_efectivo',
             'movimientos',
         ]
         read_only_fields = [
@@ -267,3 +287,231 @@ class CajaCierreSerializer(serializers.Serializer):
 
         data['justificacion_cierre'] = justificacion
         return data
+
+
+class MovimientoCajaCrearSerializer(serializers.Serializer):
+    tipo_movimiento = serializers.ChoiceField(choices=[
+        'INGRESO_MANUAL',
+        'EGRESO',
+        'RETIRO',
+        'AJUSTE_POSITIVO',
+        'AJUSTE_NEGATIVO',
+    ])
+    id_metodo_pago = serializers.IntegerField(required=False)
+    monto = serializers.DecimalField(max_digits=12, decimal_places=2)
+    descripcion = serializers.CharField()
+    referencia = serializers.CharField(required=False, allow_blank=True)
+
+    def validate_monto(self, value):
+        if value <= 0:
+            raise serializers.ValidationError("El monto del movimiento debe ser mayor a 0.")
+        return value
+
+    def validate_descripcion(self, value):
+        descripcion = value.strip()
+        if not descripcion:
+            raise serializers.ValidationError("La descripcion o concepto es obligatorio.")
+        return descripcion
+
+
+class MovimientoCajaAnularSerializer(serializers.Serializer):
+    motivo = serializers.CharField()
+
+    def validate_motivo(self, value):
+        motivo = value.strip()
+        if not motivo:
+            raise serializers.ValidationError("El motivo de anulacion es obligatorio.")
+        return motivo
+
+
+class DetalleVentaSerializer(serializers.ModelSerializer):
+    producto_nombre = serializers.CharField(source='id_producto.nombre', read_only=True, allow_null=True)
+    servicio_nombre = serializers.CharField(source='id_servicio.nombre', read_only=True, allow_null=True)
+    barbero_nombre = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = DetalleVenta
+        fields = [
+            'id_detalle',
+            'tipo_item',
+            'id_producto',
+            'producto_nombre',
+            'id_servicio',
+            'servicio_nombre',
+            'codigo_barbero',
+            'barbero_nombre',
+            'cantidad',
+            'precio_unitario',
+            'descuento',
+            'subtotal',
+        ]
+
+    @extend_schema_field(serializers.CharField(allow_null=True))
+    def get_barbero_nombre(self, obj):
+        if not obj.codigo_barbero:
+            return None
+        return f"{obj.codigo_barbero.nombre} {obj.codigo_barbero.apellido}".strip()
+
+
+class PagoVentaSerializer(serializers.ModelSerializer):
+    metodo_pago_nombre = serializers.CharField(source='id_metodo_pago.nombre', read_only=True)
+
+    class Meta:
+        model = PagoVenta
+        fields = [
+            'id_pago',
+            'id_metodo_pago',
+            'metodo_pago_nombre',
+            'monto',
+            'referencia',
+            'estado',
+            'fecha_registro',
+        ]
+        read_only_fields = ['estado', 'fecha_registro']
+
+
+class ComisionVentaSerializer(serializers.ModelSerializer):
+    barbero_nombre = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = ComisionVenta
+        fields = [
+            'id_comision',
+            'id_detalle',
+            'codigo_barbero',
+            'barbero_nombre',
+            'porcentaje',
+            'monto',
+            'estado_pago',
+            'fecha_registro',
+        ]
+        read_only_fields = ['fecha_registro']
+
+    @extend_schema_field(serializers.CharField())
+    def get_barbero_nombre(self, obj):
+        return f"{obj.codigo_barbero.nombre} {obj.codigo_barbero.apellido}".strip()
+
+
+class VentaSerializer(serializers.ModelSerializer):
+    cliente_nombre = serializers.SerializerMethodField(read_only=True)
+    cajero_nombre = serializers.SerializerMethodField(read_only=True)
+    detalles = DetalleVentaSerializer(many=True, read_only=True)
+    pagos = PagoVentaSerializer(many=True, read_only=True)
+    comisiones = ComisionVentaSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Venta
+        fields = [
+            'id_venta',
+            'codigo_cliente',
+            'cliente_nombre',
+            'id_cita',
+            'codigo_cajero',
+            'cajero_nombre',
+            'subtotal',
+            'descuento',
+            'total',
+            'estado',
+            'observacion',
+            'motivo_anulacion',
+            'fecha_registro',
+            'fecha_actualizacion',
+            'detalles',
+            'pagos',
+            'comisiones',
+        ]
+        read_only_fields = [
+            'codigo_cajero',
+            'subtotal',
+            'total',
+            'estado',
+            'motivo_anulacion',
+            'fecha_registro',
+            'fecha_actualizacion',
+        ]
+
+    @extend_schema_field(serializers.CharField(allow_null=True))
+    def get_cliente_nombre(self, obj):
+        if not obj.codigo_cliente:
+            return None
+        return f"{obj.codigo_cliente.nombre} {obj.codigo_cliente.apellido}".strip()
+
+    @extend_schema_field(serializers.CharField())
+    def get_cajero_nombre(self, obj):
+        return f"{obj.codigo_cajero.nombre} {obj.codigo_cajero.apellido}".strip()
+
+
+class DetalleVentaInputSerializer(serializers.Serializer):
+    tipo_item = serializers.ChoiceField(choices=['PRODUCTO', 'SERVICIO'])
+    id_producto = serializers.IntegerField(required=False)
+    id_servicio = serializers.IntegerField(required=False)
+    codigo_barbero = serializers.CharField(required=False, allow_blank=True)
+    cantidad = serializers.IntegerField(min_value=1, default=1)
+    descuento = serializers.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+    def validate_descuento(self, value):
+        if value < 0:
+            raise serializers.ValidationError("El descuento no puede ser negativo.")
+        return value
+
+    def validate(self, data):
+        tipo_item = data.get('tipo_item')
+        if tipo_item == 'PRODUCTO' and not data.get('id_producto'):
+            raise serializers.ValidationError({'id_producto': 'El producto es obligatorio para un detalle PRODUCTO.'})
+        if tipo_item == 'SERVICIO':
+            if not data.get('id_servicio'):
+                raise serializers.ValidationError({'id_servicio': 'El servicio es obligatorio para un detalle SERVICIO.'})
+            if not data.get('codigo_barbero'):
+                raise serializers.ValidationError({'codigo_barbero': 'El barbero es obligatorio para un detalle SERVICIO.'})
+        return data
+
+
+class VentaCrearSerializer(serializers.Serializer):
+    codigo_cliente = serializers.CharField(required=False, allow_blank=True)
+    id_cita = serializers.IntegerField(required=False)
+    descuento = serializers.DecimalField(max_digits=12, decimal_places=2, default=0)
+    observacion = serializers.CharField(required=False, allow_blank=True)
+    detalles = DetalleVentaInputSerializer(many=True, required=False)
+
+    def validate_descuento(self, value):
+        if value < 0:
+            raise serializers.ValidationError("El descuento no puede ser negativo.")
+        return value
+
+    def validate_detalles(self, value):
+        return value
+
+    def validate(self, data):
+        if not data.get('id_cita') and not data.get('detalles'):
+            raise serializers.ValidationError({'detalles': 'La venta debe tener detalles o estar vinculada a una cita.'})
+        return data
+
+
+class PagoVentaInputSerializer(serializers.Serializer):
+    id_metodo_pago = serializers.IntegerField()
+    monto = serializers.DecimalField(max_digits=12, decimal_places=2)
+    referencia = serializers.CharField(required=False, allow_blank=True)
+
+    def validate_monto(self, value):
+        if value <= 0:
+            raise serializers.ValidationError("El monto del pago debe ser mayor a 0.")
+        return value
+
+
+class VentaConfirmarSerializer(serializers.Serializer):
+    pagos = PagoVentaInputSerializer(many=True)
+
+    def validate_pagos(self, value):
+        if not value:
+            raise serializers.ValidationError("Debe registrar al menos un pago.")
+        return value
+
+
+class VentaAnularSerializer(serializers.Serializer):
+    motivo = serializers.CharField()
+
+    def validate_motivo(self, value):
+        motivo = value.strip()
+        if not motivo:
+            raise serializers.ValidationError("El motivo de anulacion es obligatorio.")
+        return motivo
