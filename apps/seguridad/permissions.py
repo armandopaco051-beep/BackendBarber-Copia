@@ -60,6 +60,19 @@ class EsAdminOBarbero(BasePermission):
         return usuario.es_admin or usuario.es_barbero
 
 
+class EsAdminOCajero(BasePermission):
+    """
+    Administrador o Cajero pueden operar caja.
+    """
+    message = "Solo Administradores o Cajeros tienen permiso para operar caja."
+
+    def has_permission(self, request, view):
+        usuario = getattr(request, 'usuario_actual', None)
+        if not usuario:
+            return False
+        return usuario.es_admin or usuario.es_cajero
+
+
 class EsCualquierUsuario(BasePermission):
     """
     Cualquier usuario autenticado (A1, A2, A3) puede acceder.
