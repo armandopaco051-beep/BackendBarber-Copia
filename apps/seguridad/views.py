@@ -12,7 +12,7 @@ from rest_framework_simplejwt.exceptions import TokenError
 from drf_spectacular.utils import extend_schema, OpenApiExample, OpenApiResponse
 import secrets
 
-from .models import AsistenciaBarbero, Bitacora, BloqueoHorario, HorarioLaboral, Rol, Usuario
+from .models import AsistenciaBarbero, Bitacora, BloqueoHorario, HorarioLaboral, Permiso, Rol, Usuario
 from .serializers import (
     AsistenciaBarberoSerializer,
     BitacoraSerializer,
@@ -20,6 +20,8 @@ from .serializers import (
     HorarioLaboralSerializer,
     LoginSerializer,
     LogoutSerializer,
+    PermisoSerializer,
+    RolPermisosSerializer,
     SolicitarRecuperacionSerializer,
     ValidarCodigoRecuperacionSerializer,
     RestablecerPasswordSerializer,
@@ -31,7 +33,7 @@ from .serializers import (
     BarberoCrearSerializer,
     BarberoSerializer,
 )
-from .permissions import EsAdmin, EsAdminOConfiguracionInicial, EsAdminOLecturaAutenticada, EsCualquierUsuario
+from .permissions import EsAdmin, EsAdminOConfiguracionInicial, EsAdminOLecturaAutenticada, EsCualquierUsuario, TienePermiso
 from .authentication import generar_tokens
 
 
@@ -365,7 +367,8 @@ class RestablecerPasswordView(APIView):
 
 @extend_schema(tags=["CU6 - Bitácora"])
 class BitacoraListView(APIView):
-    permission_classes = [EsAdmin]
+    permission_classes = [TienePermiso]
+    permiso_requerido = 'bitacora.ver'
 
     @extend_schema(
         summary="Listar bitácora",
@@ -380,7 +383,11 @@ class BitacoraListView(APIView):
 
 @extend_schema(tags=["CU3 - Gestionar Usuarios"])
 class UsuarioListCreateView(APIView):
-    permission_classes = [EsAdminOConfiguracionInicial]
+    permission_classes = [TienePermiso]
+    permisos_por_metodo = {
+        'GET': 'usuarios.ver',
+        'POST': 'usuarios.crear',
+    }
 
     @extend_schema(
         summary="Listar todos los usuarios",
@@ -421,7 +428,12 @@ class UsuarioListCreateView(APIView):
 
 @extend_schema(tags=["CU3 - Gestionar Usuarios"])
 class UsuarioDetalleView(APIView):
-    permission_classes = [EsAdmin]
+    permission_classes = [TienePermiso]
+    permisos_por_metodo = {
+        'GET': 'usuarios.ver',
+        'PUT': 'usuarios.editar',
+        'DELETE': 'usuarios.eliminar',
+    }
 
     def _get_usuario(self, codigo):
         try:
@@ -489,7 +501,11 @@ class UsuarioDetalleView(APIView):
 
 @extend_schema(tags=["CU4 - Gestionar Roles"])
 class RolListCreateView(APIView):
-    permission_classes = [EsAdminOConfiguracionInicial]
+    permission_classes = [TienePermiso]
+    permisos_por_metodo = {
+        'GET': 'roles.ver',
+        'POST': 'roles.crear',
+    }
 
     @extend_schema(
         summary="Listar todos los roles",
@@ -519,7 +535,11 @@ class RolListCreateView(APIView):
 
 @extend_schema(tags=["CU4 - Gestionar Roles"])
 class RolDetalleView(APIView):
-    permission_classes = [EsAdmin]
+    permission_classes = [TienePermiso]
+    permisos_por_metodo = {
+        'PUT': 'roles.editar',
+        'DELETE': 'roles.eliminar',
+    }
 
     def _get_rol(self, id):
         try:
@@ -571,6 +591,85 @@ class RolDetalleView(APIView):
 # ─────────────────────────────────────────────────────────────────────────────
 # CU5 — Gestionar Barberos  (solo A1)
 # ─────────────────────────────────────────────────────────────────────────────
+
+@extend_schema(tags=["CU4 - Gestionar Roles"])
+class PermisoListView(APIView):
+    permission_classes = [TienePermiso]
+    permiso_requerido = 'roles.asignar_permisos'
+
+    @extend_schema(
+        summary="Listar permisos disponibles",
+        responses={200: PermisoSerializer(many=True)}
+    )
+    def get(self, request):
+        permisos = Permiso.objects.all()
+        return Response(PermisoSerializer(permisos, many=True).data, status=status.HTTP_200_OK)
+
+
+@extend_schema(tags=["CU4 - Gestionar Roles"])
+class RolPermisosView(APIView):
+    permission_classes = [TienePermiso]
+    permisos_por_metodo = {
+        'GET': 'roles.ver',
+        'PUT': 'roles.asignar_permisos',
+    }
+
+    def _get_rol(self, id):
+        try:
+            return Rol.objects.prefetch_related('permisos').get(pk=id)
+        except Rol.DoesNotExist:
+            return None
+
+    @extend_schema(
+        summary="Ver permisos de un rol",
+        responses={200: RolSerializer, 404: OpenApiResponse(description="Rol no encontrado.")}
+    )
+    def get(self, request, id):
+        rol = self._get_rol(id)
+        if not rol:
+            return Response({'error': 'Rol no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response({
+            'rol': RolSerializer(rol).data,
+            'permisos': rol.codigos_permisos(),
+        }, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        summary="Asignar permisos a un rol",
+        request=RolPermisosSerializer,
+        responses={
+            200: OpenApiResponse(description="Permisos asignados."),
+            400: OpenApiResponse(description="Datos invalidos."),
+            404: OpenApiResponse(description="Rol no encontrado."),
+        },
+        examples=[
+            OpenApiExample(
+                "Asignar permisos",
+                value={"permisos": ["citas.ver", "citas.crear", "clientes.ver"]},
+                request_only=True,
+            )
+        ]
+    )
+    def put(self, request, id):
+        rol = self._get_rol(id)
+        if not rol:
+            return Response({'error': 'Rol no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+        if rol.nombre.lower() == 'administrador':
+            return Response({'error': 'El rol Administrador tiene todos los permisos por defecto.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        serializer = RolPermisosSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        permisos = Permiso.objects.filter(codigo__in=serializer.validated_data['permisos'])
+        rol.permisos.set(permisos)
+        registrar_bitacora(request, 'ASIGNAR_PERMISOS_ROL', f'Permisos actualizados para rol: {rol.nombre}.')
+        rol = self._get_rol(id)
+        return Response({
+            'mensaje': 'Permisos asignados correctamente.',
+            'rol': RolSerializer(rol).data,
+            'permisos': rol.codigos_permisos(),
+        }, status=status.HTTP_200_OK)
+
 
 @extend_schema(tags=["CU5 - Gestionar Barberos"])
 class BarberoListCreateView(APIView):

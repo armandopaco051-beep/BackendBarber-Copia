@@ -9,7 +9,9 @@ from apps.servicios.models import Servicio
 
 from .models import (
     BarberoServicio,
+    AtencionServicio,
     Cita,
+    DetalleAtencionServicio,
     DetalleServicioCita,
     DetallePromocion,
     EstadoCita,
@@ -325,6 +327,94 @@ class DetalleServicioCitaSerializer(serializers.ModelSerializer):
 
 class ServicioCitaInputSerializer(serializers.Serializer):
     id_servicio = serializers.IntegerField()
+
+
+class DetalleAtencionServicioSerializer(serializers.ModelSerializer):
+    servicio = serializers.CharField(source='id_servicio.nombre', read_only=True)
+
+    class Meta:
+        model = DetalleAtencionServicio
+        fields = [
+            'id_detalle_atencion',
+            'id_servicio',
+            'servicio',
+            'precio_unitario',
+            'cantidad',
+            'subtotal',
+            'observacion',
+        ]
+
+
+class ServicioAtencionInputSerializer(serializers.Serializer):
+    id_servicio = serializers.IntegerField()
+    cantidad = serializers.IntegerField(required=False, min_value=1, default=1)
+    observacion = serializers.CharField(required=False, allow_blank=True)
+
+
+class AtencionServicioSerializer(serializers.ModelSerializer):
+    cliente = serializers.SerializerMethodField()
+    barbero = serializers.SerializerMethodField()
+    estado_cita = serializers.CharField(source='id_cita.id_estadoc.nombre', read_only=True)
+    detalles = DetalleAtencionServicioSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = AtencionServicio
+        fields = [
+            'id_atencion',
+            'id_cita',
+            'codigo_cliente',
+            'cliente',
+            'codigo_barbero',
+            'barbero',
+            'fecha',
+            'hora_inicio',
+            'hora_fin',
+            'estado',
+            'estado_cita',
+            'observaciones',
+            'total_servicios',
+            'listo_para_cobro',
+            'detalles',
+            'registrado_por',
+            'fecha_registro',
+            'fecha_actualizacion',
+        ]
+        read_only_fields = fields
+
+    @extend_schema_field(serializers.CharField())
+    def get_cliente(self, obj):
+        return f"{obj.codigo_cliente.nombre} {obj.codigo_cliente.apellido}".strip()
+
+    @extend_schema_field(serializers.CharField())
+    def get_barbero(self, obj):
+        return f"{obj.codigo_barbero.nombre} {obj.codigo_barbero.apellido}".strip()
+
+
+class AtencionIniciarSerializer(serializers.Serializer):
+    id_cita = serializers.IntegerField()
+
+
+class AtencionAgregarServiciosSerializer(serializers.Serializer):
+    servicios = ServicioAtencionInputSerializer(many=True)
+
+    def validate_servicios(self, value):
+        if not value:
+            raise serializers.ValidationError('Debe enviar al menos un servicio.')
+        ids = [item['id_servicio'] for item in value]
+        servicios = Servicio.objects.filter(pk__in=ids, estado='ACTIVO')
+        existentes = set(servicios.values_list('id_servicio', flat=True))
+        faltantes = [id_servicio for id_servicio in ids if id_servicio not in existentes]
+        if faltantes:
+            raise serializers.ValidationError(f'Servicios activos no encontrados: {faltantes}.')
+        return value
+
+
+class AtencionFinalizarSerializer(serializers.Serializer):
+    observaciones = serializers.CharField(required=False, allow_blank=True)
+
+
+class AtencionCambiarEstadoSerializer(serializers.Serializer):
+    observaciones = serializers.CharField(required=False, allow_blank=True)
 
 
 # Serializer principal del CU11.

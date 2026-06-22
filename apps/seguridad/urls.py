@@ -16,8 +16,10 @@ from .views import (
     HorarioLaboralListCreateView,
     UsuarioListCreateView,
     UsuarioDetalleView,
+    PermisoListView,
     RolListCreateView,
     RolDetalleView,
+    RolPermisosView,
     BarberoListCreateView,
     BarberoDetalleView,
 )
@@ -45,6 +47,8 @@ urlpatterns = [
     # ── CU4: Gestionar roles ─────────────────────────────────────────────────
     path('roles/', RolListCreateView.as_view(), name='rol-list-create'),
     path('roles/<int:id>/', RolDetalleView.as_view(), name='rol-detalle'),
+    path('permisos/', PermisoListView.as_view(), name='permiso-list'),
+    path('roles/<int:id>/permisos/', RolPermisosView.as_view(), name='rol-permisos'),
 
     # ── CU5: Gestionar barberos ──────────────────────────────────────────────
     path('barberos/', BarberoListCreateView.as_view(), name='barbero-list-create'),

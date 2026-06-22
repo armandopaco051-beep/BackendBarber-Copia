@@ -3,7 +3,7 @@ from django.contrib.auth.hashers import make_password, check_password
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema_field
 from datetime import timedelta
-from .models import AsistenciaBarbero, Bitacora, BloqueoHorario, HorarioLaboral, Rol, Usuario
+from .models import AsistenciaBarbero, Bitacora, BloqueoHorario, HorarioLaboral, Permiso, Rol, Usuario
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -11,14 +11,46 @@ from .models import AsistenciaBarbero, Bitacora, BloqueoHorario, HorarioLaboral,
 # ─────────────────────────────────────────────────────────────────────────────
 
 class RolSerializer(serializers.ModelSerializer):
+    permisos = serializers.SerializerMethodField()
+
     class Meta:
         model = Rol
-        fields = ['id', 'nombre']
+        fields = ['id', 'nombre', 'permisos']
+
+    @extend_schema_field(serializers.ListField(child=serializers.CharField()))
+    def get_permisos(self, obj):
+        return obj.codigos_permisos()
 
     def validate_nombre(self, value):
         if not value.strip():
             raise serializers.ValidationError("El nombre del rol no puede estar vacío.")
         return value.strip()
+
+
+class PermisoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Permiso
+        fields = ['id', 'codigo', 'nombre', 'modulo', 'accion', 'descripcion']
+
+
+class RolPermisosSerializer(serializers.Serializer):
+    permisos = serializers.ListField(
+        child=serializers.CharField(max_length=100),
+        allow_empty=True,
+    )
+
+    def validate_permisos(self, value):
+        codigos = []
+        for codigo in value:
+            codigo_normalizado = codigo.strip().lower()
+            if codigo_normalizado and codigo_normalizado not in codigos:
+                codigos.append(codigo_normalizado)
+
+        existentes = set(Permiso.objects.filter(codigo__in=codigos).values_list('codigo', flat=True))
+        faltantes = [codigo for codigo in codigos if codigo not in existentes]
+        if faltantes:
+            raise serializers.ValidationError(f"Permisos inexistentes: {', '.join(faltantes)}")
+        return codigos
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -34,7 +66,7 @@ class LoginSerializer(serializers.Serializer):
         password = data.get('password')
 
         try:
-            usuario = Usuario.objects.select_related('id_rol').get(correo__iexact=correo)
+            usuario = Usuario.objects.select_related('id_rol').prefetch_related('id_rol__permisos').get(correo__iexact=correo)
         except Usuario.DoesNotExist:
             raise serializers.ValidationError("Credenciales incorrectas.")
         except Usuario.MultipleObjectsReturned:

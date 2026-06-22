@@ -5,7 +5,7 @@ from django.db.models import Sum
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
-from apps.citas.models import EstadoCita, HistorialEstadoCita, Cita
+from apps.citas.models import AtencionServicio, EstadoCita, HistorialEstadoCita, Cita
 from apps.inventario.models import MovimientoInventario, Producto
 from apps.seguridad.models import Usuario
 from apps.servicios.models import Servicio
@@ -256,29 +256,46 @@ def crear_venta_borrador(data, usuario):
     if cita:
         tiene_servicios_enviados = any(item.get('tipo_item') == 'SERVICIO' for item in detalles)
         if not tiene_servicios_enviados:
-            detalles_cita = list(cita.servicios_detalle.select_related('id_servicio').all())
-            if detalles_cita:
+            atencion = AtencionServicio.objects.filter(
+                id_cita=cita,
+                estado='FINALIZADA',
+                listo_para_cobro=True,
+            ).prefetch_related('detalles__id_servicio').first()
+            detalles_atencion = list(atencion.detalles.select_related('id_servicio').all()) if atencion else []
+            if detalles_atencion:
                 detalles = [
                     {
                         'tipo_item': 'SERVICIO',
                         'id_servicio': detalle.id_servicio_id,
-                        'codigo_barbero': cita.codigo_barbero_id,
-                        'cantidad': 1,
+                        'codigo_barbero': atencion.codigo_barbero_id,
+                        'cantidad': detalle.cantidad,
                         'descuento': Decimal('0.00'),
                     }
-                    for detalle in detalles_cita
+                    for detalle in detalles_atencion
                 ] + detalles
-            elif cita.id_servicio_id:
-                detalles = [
-                    {
-                        'tipo_item': 'SERVICIO',
-                        'id_servicio': cita.id_servicio_id,
-                        'codigo_barbero': cita.codigo_barbero_id,
-                        'cantidad': 1,
-                        'descuento': Decimal('0.00'),
-                    }
-                ] + detalles
-
+            else:
+                detalles_cita = list(cita.servicios_detalle.select_related('id_servicio').all())
+                if detalles_cita:
+                    detalles = [
+                        {
+                            'tipo_item': 'SERVICIO',
+                            'id_servicio': detalle.id_servicio_id,
+                            'codigo_barbero': cita.codigo_barbero_id,
+                            'cantidad': 1,
+                            'descuento': Decimal('0.00'),
+                        }
+                        for detalle in detalles_cita
+                    ] + detalles
+                elif cita.id_servicio_id:
+                    detalles = [
+                        {
+                            'tipo_item': 'SERVICIO',
+                            'id_servicio': cita.id_servicio_id,
+                            'codigo_barbero': cita.codigo_barbero_id,
+                            'cantidad': 1,
+                            'descuento': Decimal('0.00'),
+                        }
+                    ] + detalles
     if not detalles:
         raise ValidationError({'detalles': 'La venta debe tener al menos un detalle.'})
 

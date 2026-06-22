@@ -146,6 +146,98 @@ class DetalleServicioCita(models.Model):
         return f"Cita {self.id_cita_id} - {self.id_servicio.nombre}"
 
 
+class AtencionServicio(models.Model):
+    ESTADOS = (
+        ('PENDIENTE', 'Pendiente'),
+        ('EN_ATENCION', 'En atencion'),
+        ('FINALIZADA', 'Finalizada'),
+        ('CANCELADA', 'Cancelada'),
+        ('NO_ASISTIO', 'No asistio'),
+    )
+
+    id_atencion = models.AutoField(primary_key=True)
+    id_cita = models.OneToOneField(
+        Cita,
+        on_delete=models.CASCADE,
+        db_column='id_cita',
+        related_name='atencion_servicio'
+    )
+    codigo_barbero = models.ForeignKey(
+        Usuario,
+        on_delete=models.PROTECT,
+        db_column='codigo_barbero',
+        related_name='atenciones_servicio'
+    )
+    codigo_cliente = models.ForeignKey(
+        Usuario,
+        on_delete=models.PROTECT,
+        db_column='codigo_cliente',
+        related_name='atenciones_recibidas'
+    )
+    fecha = models.DateField()
+    hora_inicio = models.DateTimeField(null=True, blank=True)
+    hora_fin = models.DateTimeField(null=True, blank=True)
+    estado = models.CharField(max_length=20, choices=ESTADOS, default='PENDIENTE')
+    observaciones = models.TextField(blank=True)
+    total_servicios = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    listo_para_cobro = models.BooleanField(default=False)
+    registrado_por = models.ForeignKey(
+        Usuario,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_column='registrado_por',
+        related_name='atenciones_registradas'
+    )
+    fecha_registro = models.DateTimeField(auto_now_add=True)
+    fecha_actualizacion = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = '"agenda"."atencion_servicio"'
+        verbose_name = 'Atencion de servicio'
+        verbose_name_plural = 'Atenciones de servicio'
+        ordering = ['-fecha', '-hora_inicio', '-id_atencion']
+
+    def recalcular_total(self):
+        total = sum(detalle.subtotal for detalle in self.detalles.all())
+        self.total_servicios = total
+        self.save(update_fields=['total_servicios', 'fecha_actualizacion'])
+        return self.total_servicios
+
+    def __str__(self):
+        return f"Atencion {self.id_atencion} - Cita {self.id_cita_id}"
+
+
+class DetalleAtencionServicio(models.Model):
+    id_detalle_atencion = models.AutoField(primary_key=True)
+    id_atencion = models.ForeignKey(
+        AtencionServicio,
+        on_delete=models.CASCADE,
+        db_column='id_atencion',
+        related_name='detalles'
+    )
+    id_servicio = models.ForeignKey(
+        Servicio,
+        on_delete=models.PROTECT,
+        db_column='id_servicio',
+        related_name='detalles_atencion'
+    )
+    precio_unitario = models.DecimalField(max_digits=10, decimal_places=2)
+    cantidad = models.PositiveIntegerField(default=1)
+    subtotal = models.DecimalField(max_digits=10, decimal_places=2)
+    observacion = models.TextField(blank=True)
+
+    class Meta:
+        db_table = '"agenda"."detalle_atencion_servicio"'
+        verbose_name = 'Detalle de atencion de servicio'
+        verbose_name_plural = 'Detalles de atenciones de servicio'
+        ordering = ['id_detalle_atencion']
+        unique_together = ('id_atencion', 'id_servicio')
+
+    def __str__(self):
+        return f"Atencion {self.id_atencion_id} - {self.id_servicio.nombre}"
+
+
 # Historial de cambios de estado de una cita.
 # Permite defender trazabilidad: Pendiente -> Confirmada -> Finalizada, etc.
 # Tabla fisica: agenda.historial_estado_cita.

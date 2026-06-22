@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 
+from django.core.exceptions import ValidationError
 from django.utils.dateparse import parse_date
 from drf_spectacular.utils import extend_schema, OpenApiExample, OpenApiParameter, OpenApiResponse
 from rest_framework import status
@@ -7,12 +8,17 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.seguridad.models import AsistenciaBarbero, BloqueoHorario, HorarioLaboral, Usuario
-from apps.seguridad.permissions import EsAdmin
+from apps.seguridad.permissions import EsAdmin, EsAdminOBarbero
 from apps.seguridad.views import registrar_bitacora
 from apps.servicios.models import Servicio
 
-from .models import BarberoServicio, Cita, EstadoCita, Promocion
+from .models import AtencionServicio, BarberoServicio, Cita, EstadoCita, Promocion
 from .serializers import (
+    AtencionAgregarServiciosSerializer,
+    AtencionCambiarEstadoSerializer,
+    AtencionFinalizarSerializer,
+    AtencionIniciarSerializer,
+    AtencionServicioSerializer,
     BarberoServicioSerializer,
     CitaSerializer,
     DIAS_SEMANA,
@@ -20,6 +26,12 @@ from .serializers import (
     EstadoCitaSerializer,
     HistorialEstadoCitaSerializer,
     PromocionSerializer,
+)
+from .services import (
+    agregar_servicios_atencion,
+    cambiar_estado_atencion,
+    finalizar_atencion,
+    iniciar_atencion,
 )
 
 
@@ -523,6 +535,218 @@ class CitaAgregarServiciosView(APIView):
                 status=status.HTTP_200_OK
             )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@extend_schema(tags=["CU23 - Registrar Atencion de Servicio"])
+class AtencionServicioListView(APIView):
+    permission_classes = [EsAdminOBarbero]
+
+    @extend_schema(
+        summary="Listar atenciones de servicio",
+        description="Administrador ve todas. Barbero ve solo sus atenciones/citas asignadas.",
+        responses={200: AtencionServicioSerializer(many=True)}
+    )
+    def get(self, request):
+        usuario = getattr(request, 'usuario_actual', None)
+        atenciones = AtencionServicio.objects.select_related(
+            'id_cita',
+            'id_cita__id_estadoc',
+            'codigo_cliente',
+            'codigo_barbero',
+            'registrado_por',
+        ).prefetch_related('detalles__id_servicio').all()
+
+        if usuario and usuario.es_barbero and not usuario.es_admin:
+            atenciones = atenciones.filter(codigo_barbero=usuario)
+
+        fecha = request.query_params.get('fecha')
+        estado = request.query_params.get('estado')
+        codigo_barbero = request.query_params.get('codigo_barbero')
+        listo_para_cobro = request.query_params.get('listo_para_cobro')
+
+        if fecha:
+            atenciones = atenciones.filter(fecha=fecha)
+        if estado:
+            atenciones = atenciones.filter(estado=estado.upper())
+        if codigo_barbero and usuario.es_admin:
+            atenciones = atenciones.filter(codigo_barbero_id=codigo_barbero)
+        if listo_para_cobro is not None:
+            atenciones = atenciones.filter(listo_para_cobro=str(listo_para_cobro).lower() == 'true')
+
+        return Response(AtencionServicioSerializer(atenciones, many=True).data, status=status.HTTP_200_OK)
+
+
+@extend_schema(tags=["CU23 - Registrar Atencion de Servicio"])
+class AtencionPendienteListView(APIView):
+    permission_classes = [EsAdminOBarbero]
+
+    @extend_schema(
+        summary="Listar citas pendientes de atencion",
+        description="Muestra citas que aun no tienen atencion finalizada/cancelada/no asistio.",
+        responses={200: CitaSerializer(many=True)}
+    )
+    def get(self, request):
+        usuario = getattr(request, 'usuario_actual', None)
+        citas = Cita.objects.select_related(
+            'codigo_cliente',
+            'codigo_cliente__id_rol',
+            'codigo_barbero',
+            'codigo_barbero__id_rol',
+            'id_servicio',
+            'id_estadoc',
+            'registrado_por',
+        ).prefetch_related('servicios_detalle__id_servicio').exclude(
+            id_estadoc__nombre__in=['ANULADA', 'CANCELADA', 'FINALIZADA', 'ATENDIDA', 'NO_ASISTIO']
+        ).exclude(
+            atencion_servicio__estado__in=['FINALIZADA', 'CANCELADA', 'NO_ASISTIO']
+        )
+
+        if usuario and usuario.es_barbero and not usuario.es_admin:
+            citas = citas.filter(codigo_barbero=usuario)
+
+        fecha = request.query_params.get('fecha')
+        if fecha:
+            citas = citas.filter(fecha=fecha)
+
+        return Response(CitaSerializer(citas, many=True).data, status=status.HTTP_200_OK)
+
+
+@extend_schema(tags=["CU23 - Registrar Atencion de Servicio"])
+class AtencionIniciarView(APIView):
+    permission_classes = [EsAdminOBarbero]
+
+    @extend_schema(
+        summary="Iniciar atencion de una cita",
+        request=AtencionIniciarSerializer,
+        responses={200: AtencionServicioSerializer, 400: OpenApiResponse(description="No se pudo iniciar.")}
+    )
+    def post(self, request):
+        serializer = AtencionIniciarSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            atencion = iniciar_atencion(serializer.validated_data['id_cita'], getattr(request, 'usuario_actual', None))
+            registrar_bitacora(request, 'INICIAR_ATENCION', f'Atencion iniciada: {atencion.id_atencion}.')
+        except ValidationError as error:
+            return Response({'error': error.message_dict if hasattr(error, 'message_dict') else error.messages}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'mensaje': 'Atencion iniciada correctamente.', 'atencion': AtencionServicioSerializer(atencion).data})
+
+
+@extend_schema(tags=["CU23 - Registrar Atencion de Servicio"])
+class AtencionDetalleView(APIView):
+    permission_classes = [EsAdminOBarbero]
+
+    def _get_atencion(self, id_atencion, request):
+        usuario = getattr(request, 'usuario_actual', None)
+        queryset = AtencionServicio.objects.select_related(
+            'id_cita',
+            'id_cita__id_estadoc',
+            'codigo_cliente',
+            'codigo_barbero',
+            'registrado_por',
+        ).prefetch_related('detalles__id_servicio')
+        if usuario and usuario.es_barbero and not usuario.es_admin:
+            queryset = queryset.filter(codigo_barbero=usuario)
+        return queryset.filter(pk=id_atencion).first()
+
+    @extend_schema(summary="Ver detalle de atencion", responses={200: AtencionServicioSerializer})
+    def get(self, request, id_atencion):
+        atencion = self._get_atencion(id_atencion, request)
+        if not atencion:
+            return Response({'error': 'Atencion no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(AtencionServicioSerializer(atencion).data)
+
+
+@extend_schema(tags=["CU23 - Registrar Atencion de Servicio"])
+class AtencionAgregarServiciosView(APIView):
+    permission_classes = [EsAdminOBarbero]
+
+    @extend_schema(
+        summary="Agregar servicios realizados durante la atencion",
+        request=AtencionAgregarServiciosSerializer,
+        responses={200: AtencionServicioSerializer}
+    )
+    def post(self, request, id_atencion):
+        serializer = AtencionAgregarServiciosSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            atencion = agregar_servicios_atencion(id_atencion, serializer.validated_data['servicios'], getattr(request, 'usuario_actual', None))
+            registrar_bitacora(request, 'AGREGAR_SERVICIOS_ATENCION', f'Servicios agregados a atencion: {atencion.id_atencion}.')
+        except AtencionServicio.DoesNotExist:
+            return Response({'error': 'Atencion no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        except ValidationError as error:
+            return Response({'error': error.message_dict if hasattr(error, 'message_dict') else error.messages}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'mensaje': 'Servicios agregados correctamente.', 'atencion': AtencionServicioSerializer(atencion).data})
+
+
+@extend_schema(tags=["CU23 - Registrar Atencion de Servicio"])
+class AtencionFinalizarView(APIView):
+    permission_classes = [EsAdminOBarbero]
+
+    @extend_schema(
+        summary="Finalizar atencion",
+        request=AtencionFinalizarSerializer,
+        responses={200: AtencionServicioSerializer}
+    )
+    def post(self, request, id_atencion):
+        serializer = AtencionFinalizarSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            atencion = finalizar_atencion(id_atencion, getattr(request, 'usuario_actual', None), serializer.validated_data.get('observaciones', ''))
+            registrar_bitacora(request, 'FINALIZAR_ATENCION', f'Atencion finalizada: {atencion.id_atencion}.')
+        except AtencionServicio.DoesNotExist:
+            return Response({'error': 'Atencion no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        except ValidationError as error:
+            return Response({'error': error.message_dict if hasattr(error, 'message_dict') else error.messages}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'mensaje': 'Atencion finalizada correctamente.', 'atencion': AtencionServicioSerializer(atencion).data})
+
+
+@extend_schema(tags=["CU23 - Registrar Atencion de Servicio"])
+class AtencionNoAsistioView(APIView):
+    permission_classes = [EsAdminOBarbero]
+
+    @extend_schema(
+        summary="Marcar atencion como no asistio",
+        request=AtencionCambiarEstadoSerializer,
+        responses={200: AtencionServicioSerializer}
+    )
+    def post(self, request, id_atencion):
+        serializer = AtencionCambiarEstadoSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            atencion = cambiar_estado_atencion(id_atencion, 'NO_ASISTIO', getattr(request, 'usuario_actual', None), serializer.validated_data.get('observaciones', ''))
+            registrar_bitacora(request, 'ATENCION_NO_ASISTIO', f'Atencion marcada no asistio: {atencion.id_atencion}.')
+        except AtencionServicio.DoesNotExist:
+            return Response({'error': 'Atencion no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        except ValidationError as error:
+            return Response({'error': error.message_dict if hasattr(error, 'message_dict') else error.messages}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'mensaje': 'Atencion marcada como no asistio.', 'atencion': AtencionServicioSerializer(atencion).data})
+
+
+@extend_schema(tags=["CU23 - Registrar Atencion de Servicio"])
+class AtencionCancelarView(APIView):
+    permission_classes = [EsAdminOBarbero]
+
+    @extend_schema(
+        summary="Cancelar atencion",
+        request=AtencionCambiarEstadoSerializer,
+        responses={200: AtencionServicioSerializer}
+    )
+    def post(self, request, id_atencion):
+        serializer = AtencionCambiarEstadoSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            atencion = cambiar_estado_atencion(id_atencion, 'CANCELADA', getattr(request, 'usuario_actual', None), serializer.validated_data.get('observaciones', ''))
+            registrar_bitacora(request, 'CANCELAR_ATENCION', f'Atencion cancelada: {atencion.id_atencion}.')
+        except AtencionServicio.DoesNotExist:
+            return Response({'error': 'Atencion no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        except ValidationError as error:
+            return Response({'error': error.message_dict if hasattr(error, 'message_dict') else error.messages}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'mensaje': 'Atencion cancelada correctamente.', 'atencion': AtencionServicioSerializer(atencion).data})
 
 
 # Consulta el historial de cambios de una cita.

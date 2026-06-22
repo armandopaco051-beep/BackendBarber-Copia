@@ -16,6 +16,30 @@ class EsAdmin(BasePermission):
         return usuario.es_admin
 
 
+class TienePermiso(BasePermission):
+    """
+    Valida permisos dinamicos guardados en BD.
+    La vista puede definir:
+    - permiso_requerido = 'ventas.crear'
+    - permisos_por_metodo = {'GET': 'ventas.ver', 'POST': 'ventas.crear'}
+    """
+    message = "No tienes permiso para realizar esta accion."
+    permiso_requerido = None
+
+    def has_permission(self, request, view):
+        usuario = getattr(request, 'usuario_actual', None)
+        if not usuario:
+            return False
+        if usuario.es_admin:
+            return True
+
+        permisos_por_metodo = getattr(view, 'permisos_por_metodo', {})
+        permiso = permisos_por_metodo.get(request.method) or getattr(view, 'permiso_requerido', self.permiso_requerido)
+        if not permiso:
+            return False
+        return usuario.tiene_permiso(permiso)
+
+
 class EsAdminOConfiguracionInicial(BasePermission):
     """
     Permite inicializar el sistema desde Swagger cuando aun no existen datos.

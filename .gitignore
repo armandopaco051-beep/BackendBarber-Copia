@@ -1,0 +1,6 @@
+.env
+vapid_private.pem
+logs/
+*.log
+__pycache__/
+*.py[cod]

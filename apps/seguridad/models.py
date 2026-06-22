@@ -17,6 +17,61 @@ class Rol(models.Model) :
     def __str__(self):
         return self.nombre
 
+    def codigos_permisos(self):
+        if self.nombre and self.nombre.lower() == 'administrador':
+            return list(Permiso.objects.values_list('codigo', flat=True))
+        return list(self.permisos.values_list('codigo', flat=True))
+
+
+class Permiso(models.Model):
+    id = models.AutoField(primary_key=True)
+    codigo = models.CharField(max_length=100, unique=True)
+    nombre = models.CharField(max_length=150)
+    modulo = models.CharField(max_length=60)
+    accion = models.CharField(max_length=60)
+    descripcion = models.TextField(blank=True)
+    roles = models.ManyToManyField(
+        Rol,
+        through='RolPermiso',
+        related_name='permisos',
+        blank=True,
+    )
+
+    class Meta:
+        db_table = '"seguridad"."permiso"'
+        verbose_name = 'Permiso'
+        verbose_name_plural = 'Permisos'
+        ordering = ['modulo', 'accion', 'codigo']
+
+    def __str__(self):
+        return self.codigo
+
+
+class RolPermiso(models.Model):
+    id = models.AutoField(primary_key=True)
+    rol = models.ForeignKey(
+        Rol,
+        on_delete=models.CASCADE,
+        db_column='id_rol',
+        related_name='roles_permisos',
+    )
+    permiso = models.ForeignKey(
+        Permiso,
+        on_delete=models.CASCADE,
+        db_column='id_permiso',
+        related_name='roles_permisos',
+    )
+    fecha_registro = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = '"seguridad"."rol_permiso"'
+        verbose_name = 'Permiso de rol'
+        verbose_name_plural = 'Permisos de roles'
+        unique_together = ('rol', 'permiso')
+
+    def __str__(self):
+        return f"{self.rol_id} - {self.permiso.codigo}"
+
 class Usuario(models.Model): 
     #tabla de seguridad de usuario , usuariios crea un sistema (admin, barbero, cliente)
     codigo = models.CharField(max_length= 100, primary_key = True)
@@ -62,6 +117,18 @@ class Usuario(models.Model):
     @property
     def es_cliente(self):
         return self.id_rol.nombre.lower() == 'cliente'
+
+    def permisos_codigos(self):
+        if not self.id_rol:
+            return []
+        return self.id_rol.codigos_permisos()
+
+    def tiene_permiso(self, codigo_permiso):
+        if self.es_admin:
+            return True
+        if not self.id_rol or not codigo_permiso:
+            return False
+        return self.id_rol.permisos.filter(codigo=codigo_permiso).exists()
 
 
 class Bitacora(models.Model):

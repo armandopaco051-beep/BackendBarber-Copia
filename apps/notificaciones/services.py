@@ -17,6 +17,18 @@ def obtener_destinatarios(usuario_destino=None, rol_destino=''):
     return Usuario.objects.select_related('id_rol').filter(id_rol__nombre__iexact='cliente')
 
 
+def obtener_url_por_tipo(tipo):
+    urls = {
+        'PROMOCION': '/cliente/promociones',
+        'NUEVO_BARBERO': '/cliente/dashboard',
+        'CITA': '/cliente/citas',
+        'RECORDATORIO_CITA': '/cliente/citas',
+        'INVENTARIO': '/admin/productos',
+        'SISTEMA': '/admin/notificaciones',
+    }
+    return urls.get((tipo or '').upper(), '/')
+
+
 def enviar_push_suscripcion(suscripcion, notificacion):
     try:
         from pywebpush import WebPushException, webpush
@@ -48,6 +60,7 @@ def enviar_push_suscripcion(suscripcion, notificacion):
             data=payload,
             vapid_private_key=private_key,
             vapid_claims={'sub': subject},
+            ttl=3600,
         )
         return True
     except WebPushException as error:
@@ -105,10 +118,17 @@ def enviar_notificacion_push(notificacion):
 
 def programar_envio_push(id_notificacion):
     try:
+        broker_url = getattr(settings, 'CELERY_BROKER_URL', '')
+        if broker_url.startswith('redis://'):
+            import redis
+            redis.Redis.from_url(broker_url, socket_connect_timeout=1).ping()
+
         from .tasks import enviar_notificacion_push_task
         enviar_notificacion_push_task.delay(id_notificacion)
     except Exception:
-        pass
+        notificacion = Notificacion.objects.filter(pk=id_notificacion).first()
+        if notificacion:
+            enviar_notificacion_push(notificacion)
 
 
 @transaction.atomic
@@ -117,7 +137,7 @@ def crear_notificacion(tipo, titulo, mensaje, url='', usuario_destino=None, rol_
         tipo=tipo,
         titulo=titulo,
         mensaje=mensaje,
-        url=url or '',
+        url=url or obtener_url_por_tipo(tipo),
         usuario_destino=usuario_destino,
         rol_destino=rol_destino or '',
     )

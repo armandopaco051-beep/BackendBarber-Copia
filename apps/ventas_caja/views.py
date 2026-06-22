@@ -6,7 +6,7 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.seguridad.permissions import EsAdmin, EsAdminOCajero
+from apps.seguridad.permissions import EsAdmin, TienePermiso
 from apps.seguridad.views import registrar_bitacora
 
 from .models import Caja, MetodoPago, MovimientoCaja, PlanComision, Venta
@@ -40,7 +40,11 @@ def accion_estado(estado, accion_activar, accion_actualizar):
 
 @extend_schema(tags=["CU13 - Gestionar Metodos de Pago"])
 class MetodoPagoListCreateView(APIView):
-    permission_classes = [EsAdmin]
+    permission_classes = [TienePermiso]
+    permisos_por_metodo = {
+        'GET': 'metodos_pago.ver',
+        'POST': 'metodos_pago.crear',
+    }
     serializer_class = MetodoPagoSerializer
 
     @extend_schema(
@@ -94,7 +98,12 @@ class MetodoPagoListCreateView(APIView):
 
 @extend_schema(tags=["CU13 - Gestionar Metodos de Pago"])
 class MetodoPagoDetalleView(APIView):
-    permission_classes = [EsAdmin]
+    permission_classes = [TienePermiso]
+    permisos_por_metodo = {
+        'GET': 'metodos_pago.ver',
+        'PUT': 'metodos_pago.editar',
+        'DELETE': 'metodos_pago.editar',
+    }
     serializer_class = MetodoPagoSerializer
 
     def _get_metodo(self, id_metodo_pago):
@@ -272,7 +281,8 @@ class PlanComisionDetalleView(APIView):
 
 @extend_schema(tags=["CU18 - Gestionar Caja"])
 class CajaEstadoView(APIView):
-    permission_classes = [EsAdminOCajero]
+    permission_classes = [TienePermiso]
+    permiso_requerido = 'caja.ver'
     serializer_class = CajaSerializer
 
     @extend_schema(
@@ -305,7 +315,8 @@ class CajaEstadoView(APIView):
 
 @extend_schema(tags=["CU18 - Gestionar Caja"])
 class CajaAbrirView(APIView):
-    permission_classes = [EsAdminOCajero]
+    permission_classes = [TienePermiso]
+    permiso_requerido = 'caja.abrir'
     serializer_class = CajaAperturaSerializer
 
     @extend_schema(
@@ -349,7 +360,8 @@ class CajaAbrirView(APIView):
 
 @extend_schema(tags=["CU18 - Gestionar Caja"])
 class CajaConsultarView(APIView):
-    permission_classes = [EsAdminOCajero]
+    permission_classes = [TienePermiso]
+    permiso_requerido = 'caja.ver'
     serializer_class = CajaSerializer
 
     @extend_schema(
@@ -375,7 +387,8 @@ class CajaConsultarView(APIView):
 
 @extend_schema(tags=["CU18 - Gestionar Caja"])
 class CajaHistorialView(APIView):
-    permission_classes = [EsAdminOCajero]
+    permission_classes = [TienePermiso]
+    permiso_requerido = 'caja.ver'
     serializer_class = CajaSerializer
 
     @extend_schema(
@@ -420,7 +433,8 @@ class CajaHistorialView(APIView):
 
 @extend_schema(tags=["CU18 - Gestionar Caja"])
 class CajaCerrarView(APIView):
-    permission_classes = [EsAdminOCajero]
+    permission_classes = [TienePermiso]
+    permiso_requerido = 'caja.cerrar'
     serializer_class = CajaCierreSerializer
 
     @extend_schema(
@@ -474,7 +488,11 @@ class CajaCerrarView(APIView):
 
 @extend_schema(tags=["CU20 - Gestionar Movimientos de Caja"])
 class MovimientoCajaListCreateView(APIView):
-    permission_classes = [EsAdminOCajero]
+    permission_classes = [TienePermiso]
+    permisos_por_metodo = {
+        'GET': 'caja.movimientos.ver',
+        'POST': 'caja.movimientos.crear',
+    }
     serializer_class = MovimientoCajaSerializer
 
     @extend_schema(
@@ -553,7 +571,8 @@ class MovimientoCajaListCreateView(APIView):
 
 @extend_schema(tags=["CU20 - Gestionar Movimientos de Caja"])
 class MovimientoCajaDetalleView(APIView):
-    permission_classes = [EsAdminOCajero]
+    permission_classes = [TienePermiso]
+    permiso_requerido = 'caja.movimientos.ver'
     serializer_class = MovimientoCajaSerializer
 
     def _get_movimiento(self, id_movimiento_caja):
@@ -575,7 +594,8 @@ class MovimientoCajaDetalleView(APIView):
 
 @extend_schema(tags=["CU20 - Gestionar Movimientos de Caja"])
 class MovimientoCajaAnularView(APIView):
-    permission_classes = [EsAdminOCajero]
+    permission_classes = [TienePermiso]
+    permiso_requerido = 'caja.movimientos.anular'
     serializer_class = MovimientoCajaAnularSerializer
 
     @extend_schema(
@@ -613,7 +633,8 @@ class MovimientoCajaAnularView(APIView):
 
 @extend_schema(tags=["CU20 - Gestionar Movimientos de Caja"])
 class CajaResumenView(APIView):
-    permission_classes = [EsAdminOCajero]
+    permission_classes = [TienePermiso]
+    permiso_requerido = 'caja.ver'
 
     @extend_schema(
         summary="Consultar resumen de caja abierta",
@@ -631,7 +652,11 @@ class CajaResumenView(APIView):
 
 @extend_schema(tags=["CU19 - Gestionar Ventas"])
 class VentaListCreateView(APIView):
-    permission_classes = [EsAdminOCajero]
+    permission_classes = [TienePermiso]
+    permisos_por_metodo = {
+        'GET': 'ventas.ver',
+        'POST': 'ventas.crear',
+    }
     serializer_class = VentaSerializer
 
     @extend_schema(
@@ -715,7 +740,8 @@ class VentaListCreateView(APIView):
 
 @extend_schema(tags=["CU19 - Gestionar Ventas"])
 class VentaDetalleView(APIView):
-    permission_classes = [EsAdminOCajero]
+    permission_classes = [TienePermiso]
+    permiso_requerido = 'ventas.ver'
     serializer_class = VentaSerializer
 
     def _get_venta(self, id_venta):
@@ -737,7 +763,8 @@ class VentaDetalleView(APIView):
 
 @extend_schema(tags=["CU19 - Gestionar Ventas"])
 class VentaConfirmarView(APIView):
-    permission_classes = [EsAdminOCajero]
+    permission_classes = [TienePermiso]
+    permiso_requerido = 'ventas.crear'
     serializer_class = VentaConfirmarSerializer
 
     @extend_schema(
@@ -786,7 +813,8 @@ class VentaConfirmarView(APIView):
 
 @extend_schema(tags=["CU19 - Gestionar Ventas"])
 class VentaAnularView(APIView):
-    permission_classes = [EsAdminOCajero]
+    permission_classes = [TienePermiso]
+    permiso_requerido = 'ventas.anular'
     serializer_class = VentaAnularSerializer
 
     @extend_schema(

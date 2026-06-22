@@ -62,6 +62,7 @@ def generar_tokens(usuario: Usuario) -> dict:
     El payload incluye: codigo, nombre, apellido, rol.
     """
     refresh = RefreshToken()
+    permisos = usuario.permisos_codigos()
 
     # ── Payload personalizado ──────────────────────────────────────────────
     refresh['codigo'] = usuario.codigo
@@ -69,6 +70,7 @@ def generar_tokens(usuario: Usuario) -> dict:
     refresh['apellido'] = usuario.apellido
     refresh['rol'] = usuario.id_rol.nombre
     refresh['id_rol'] = usuario.id_rol.id
+    refresh['permisos'] = permisos
 
     return {
         'refresh': str(refresh),
@@ -79,6 +81,8 @@ def generar_tokens(usuario: Usuario) -> dict:
             'apellido': usuario.apellido,
             'correo': usuario.correo,
             'rol': usuario.id_rol.nombre,
+            'id_rol': usuario.id_rol.id,
+            'permisos': permisos,
         }
     }
 
@@ -92,6 +96,6 @@ def obtener_usuario_desde_token(token_payload: dict):
     if not codigo:
         return None
     try:
-        return Usuario.objects.select_related('id_rol').get(codigo=codigo)
+        return Usuario.objects.select_related('id_rol').prefetch_related('id_rol__permisos').get(codigo=codigo)
     except Usuario.DoesNotExist:
         return None
