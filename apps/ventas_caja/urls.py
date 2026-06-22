@@ -16,6 +16,7 @@ from .views import (
     PlanComisionListCreateView,
     VentaAnularView,
     VentaConfirmarView,
+    VentaComprobanteView,
     VentaDetalleView,
     VentaListCreateView,
 )
@@ -41,4 +42,5 @@ urlpatterns = [
     path('ventas/<int:id_venta>/', VentaDetalleView.as_view(), name='venta-detalle'),
     path('ventas/<int:id_venta>/confirmar/', VentaConfirmarView.as_view(), name='venta-confirmar'),
     path('ventas/<int:id_venta>/anular/', VentaAnularView.as_view(), name='venta-anular'),
+    path('ventas/<int:id_venta>/comprobante/', VentaComprobanteView.as_view(), name='venta-comprobante'),
 ]

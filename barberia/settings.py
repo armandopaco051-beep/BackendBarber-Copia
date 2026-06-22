@@ -163,7 +163,9 @@ SIMPLE_JWT = {
 }
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",  # React/Vite
+    "http://127.0.0.1:5173",
     "http://localhost:3000",  # Create React App
+    "http://127.0.0.1:3000",
     "https://frontend-barberia-sage.vercel.app",
 
 ]
