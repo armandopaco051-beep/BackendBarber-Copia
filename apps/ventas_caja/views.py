@@ -9,6 +9,7 @@ from rest_framework.views import APIView
 from apps.seguridad.permissions import EsAdmin, TienePermiso
 from apps.seguridad.views import registrar_bitacora
 
+from .comprobantes import comprobante_venta_pdf
 from .models import Caja, MetodoPago, MovimientoCaja, PlanComision, Venta
 from .serializers import (
     CajaAperturaSerializer,
@@ -844,3 +845,36 @@ class VentaAnularView(APIView):
             {'mensaje': 'Venta anulada correctamente.', 'venta': VentaSerializer(venta).data},
             status=status.HTTP_200_OK
         )
+
+
+@extend_schema(tags=["CU25 - Generar Comprobante"])
+class VentaComprobanteView(APIView):
+    permission_classes = [TienePermiso]
+    permiso_requerido = 'ventas.ver'
+
+    def _get_venta(self, id_venta):
+        try:
+            return Venta.consultar().get(pk=id_venta)
+        except Venta.DoesNotExist:
+            return None
+
+    @extend_schema(
+        summary="Generar comprobante de pago de una venta",
+        responses={
+            200: OpenApiResponse(description="PDF del comprobante generado."),
+            400: OpenApiResponse(description="La venta no esta pagada."),
+            404: OpenApiResponse(description="Venta no encontrada."),
+        }
+    )
+    def get(self, request, id_venta):
+        venta = self._get_venta(id_venta)
+        if not venta:
+            return Response({'error': 'Venta no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        if venta.estado != 'PAGADA':
+            return Response(
+                {'error': 'Solo se puede generar comprobante para ventas pagadas.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        registrar_bitacora(request, 'GENERAR_COMPROBANTE', f'Comprobante generado para venta: {venta.id_venta}.')
+        return comprobante_venta_pdf(venta)
