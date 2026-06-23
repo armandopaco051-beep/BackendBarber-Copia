@@ -1,16 +1,32 @@
 from drf_spectacular.utils import OpenApiParameter, extend_schema
+from django.conf import settings
 from django.db import models
 from django.db.models import Q
+from rest_framework import status
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.citas.models import DetallePromocion
 from apps.inventario.models import Producto
-from apps.seguridad.permissions import EsAdmin
+from apps.seguridad.permissions import EsAdmin, TienePermiso
 from apps.seguridad.views import registrar_bitacora
 from apps.ventas_caja.models import Caja, ComisionVenta, DetalleVenta, MovimientoCaja, Venta
 
+from .services import GroqTranscripcionService, ReporteVozError, ReporteVozInterpreterService
 from .utils import parse_bool, parse_date, report_response
+
+
+def _debug_reporte_voz(message):
+    if settings.DEBUG:
+        print(f'[REPORTES VOZ] {message}')
+
+
+def _debug_reporte_voz_request(request):
+    if settings.DEBUG:
+        print(f'[REPORTES VOZ] endpoint reached: {request.path}')
+        print(f'[REPORTES VOZ] method: {request.method}')
+        print(f'[REPORTES VOZ] groq_configurado: {bool(settings.GROQ_API_KEY)}')
 
 
 def _fecha_rango(queryset, request, field='fecha_registro'):
@@ -74,6 +90,40 @@ def _preview_response(columnas, keys, rows):
         'columnas': columnas,
         'filas': _dict_rows(keys, rows),
     })
+
+
+def _validar_audio_reporte(audio):
+    extensiones_validas = {'.webm', '.wav', '.mp3', '.m4a', '.ogg'}
+    mime_types_validos = {
+        'audio/webm',
+        'audio/webm;codecs=opus',
+        'audio/wav',
+        'audio/x-wav',
+        'audio/mpeg',
+        'audio/mp3',
+        'audio/mp4',
+        'audio/x-m4a',
+        'audio/aac',
+        'audio/ogg',
+        'application/ogg',
+    }
+    tamano_maximo = 15 * 1024 * 1024
+
+    if not audio:
+        raise ReporteVozError('Debes adjuntar un archivo de audio en el campo "audio".', status_code=400)
+
+    nombre = (audio.name or '').lower()
+    extension = f".{nombre.rsplit('.', 1)[-1]}" if '.' in nombre else ''
+    content_type = (getattr(audio, 'content_type', '') or '').lower()
+
+    if extension not in extensiones_validas:
+        raise ReporteVozError('El audio debe estar en formato webm, wav, mp3, m4a u ogg.', status_code=400)
+
+    if content_type and content_type not in mime_types_validos:
+        raise ReporteVozError('El tipo de archivo de audio no es valido.', status_code=400)
+
+    if audio.size > tamano_maximo:
+        raise ReporteVozError('El audio supera el limite permitido de 15 MB.', status_code=400)
 
 
 def _ventas_data(request):
@@ -463,3 +513,105 @@ class ReporteServiciosPromocionPreviewView(APIView):
     def get(self, request):
         headers, keys, rows = _servicios_promocion_data(request)
         return _preview_response(headers, keys, rows)
+
+
+class BaseReporteVozView(APIView):
+    permission_classes = [TienePermiso]
+    permiso_requerido = 'reportes.ver'
+
+    def _build_response(self, modo, transcripcion, interpretacion):
+        registrar_bitacora(
+            self.request,
+            'REPORTE_VOZ',
+            f'Interpretacion de comando de {modo} para reporte {interpretacion.get("tipo_reporte") or "sin coincidencia"}.',
+        )
+        return Response(
+            {
+                'modo': modo,
+                'transcripcion': transcripcion,
+                **interpretacion,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+@extend_schema(tags=['CU21 - Reportes'])
+class ReporteVozDiagnosticoView(BaseReporteVozView):
+    def get(self, request):
+        _debug_reporte_voz_request(request)
+        groq_configurado = bool(settings.GROQ_API_KEY)
+        _debug_reporte_voz('modo=diagnostico')
+        return Response(
+            {
+                'backend': 'django-local',
+                'modulo': 'reportes-voz',
+                'groq_configurado': groq_configurado,
+                'groq_base_url': settings.GROQ_BASE_URL,
+                'modelo': settings.GROQ_TRANSCRIPTION_MODEL,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+@extend_schema(tags=['CU21 - Reportes'])
+class ReporteVozTextoView(BaseReporteVozView):
+    parser_classes = [JSONParser]
+
+    def post(self, request):
+        _debug_reporte_voz_request(request)
+        _debug_reporte_voz('modo=texto')
+        consulta = (request.data.get('consulta') or '').strip()
+        if not consulta:
+            return Response({'error': 'Debes enviar el campo "consulta".'}, status=status.HTTP_400_BAD_REQUEST)
+
+        interpretacion = ReporteVozInterpreterService.interpretar(consulta)
+        return self._build_response('texto', consulta, interpretacion)
+
+
+@extend_schema(tags=['CU21 - Reportes'])
+class ReporteVozRutasView(BaseReporteVozView):
+    def get(self, request):
+        _debug_reporte_voz_request(request)
+        _debug_reporte_voz('modo=rutas')
+        return Response(
+            {
+                'modulo': 'reportes',
+                'rutas_voz': [
+                    '/api/reportes/voz/diagnostico/',
+                    '/api/reportes/voz/texto/',
+                    '/api/reportes/voz/',
+                    '/api/reportes/debug/voz/diagnostico/',
+                    '/api/reportes/debug/voz/texto/',
+                ],
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+@extend_schema(
+    tags=['CU21 - Reportes'],
+    request={
+        'multipart/form-data': {
+            'type': 'object',
+            'properties': {
+                'audio': {'type': 'string', 'format': 'binary'},
+            },
+            'required': ['audio'],
+        }
+    },
+)
+class ReporteVozView(BaseReporteVozView):
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        _debug_reporte_voz_request(request)
+        _debug_reporte_voz('modo=audio')
+        try:
+            audio = request.FILES.get('audio')
+            _validar_audio_reporte(audio)
+            transcripcion = GroqTranscripcionService.transcribir_audio(audio)
+            interpretacion = ReporteVozInterpreterService.interpretar(transcripcion)
+        except ReporteVozError as exc:
+            return Response({'error': exc.mensaje}, status=exc.status_code)
+
+        return self._build_response('voz', transcripcion, interpretacion)

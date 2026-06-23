@@ -15,6 +15,10 @@ from .views import (
     ReporteServiciosRealizadosPreviewView,
     ReporteVentasView,
     ReporteVentasPreviewView,
+    ReporteVozDiagnosticoView,
+    ReporteVozRutasView,
+    ReporteVozTextoView,
+    ReporteVozView,
 )
 
 
@@ -33,4 +37,10 @@ urlpatterns = [
     path('comisiones/preview/', ReporteComisionesPreviewView.as_view(), name='reporte-comisiones-preview'),
     path('servicios-promocion/', ReporteServiciosPromocionView.as_view(), name='reporte-servicios-promocion'),
     path('servicios-promocion/preview/', ReporteServiciosPromocionPreviewView.as_view(), name='reporte-servicios-promocion-preview'),
+    path('voz/rutas/', ReporteVozRutasView.as_view(), name='reporte-voz-rutas'),
+    path('voz/diagnostico/', ReporteVozDiagnosticoView.as_view(), name='reporte-voz-diagnostico'),
+    path('voz/texto/', ReporteVozTextoView.as_view(), name='reporte-voz-texto'),
+    path('voz/', ReporteVozView.as_view(), name='reporte-voz'),
+    path('debug/voz/diagnostico/', ReporteVozDiagnosticoView.as_view(), name='debug-reporte-voz-diagnostico'),
+    path('debug/voz/texto/', ReporteVozTextoView.as_view(), name='debug-reporte-voz-texto'),
 ]

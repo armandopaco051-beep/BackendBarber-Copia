@@ -13,13 +13,12 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 from pathlib import Path
 from dotenv import load_dotenv
 from datetime import timedelta
-import os 
+import os
 import dj_database_url
-from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
-load_dotenv(BASE_DIR / '.env', encoding='utf-8-sig')
+load_dotenv(BASE_DIR / '.env', encoding='utf-8-sig', override=True)
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
@@ -35,13 +34,16 @@ ALLOWED_HOSTS = [
     'localhost',
     '127.0.0.1',
     '.onrender.com',
-    'frontend-barberia-sage.vercel.app'
-
+    'frontend-barberia-sage.vercel.app',
+    '.ngrok-free.dev',
+    'deduct-demystify-masses.ngrok-free.dev',
 ]
 
 CSRF_TRUSTED_ORIGINS = [
     'https://backend-barberia-ohjh.onrender.com',
-    'https://*.onrender.com'
+    'https://*.onrender.com',
+    'https://*.ngrok-free.dev',
+    'https://deduct-demystify-masses.ngrok-free.dev',
 ]
 # Application definition
 
@@ -186,6 +188,11 @@ VAPID_PRIVATE_KEY_PEM = os.getenv('VAPID_PRIVATE_KEY_PEM', '')
 
 CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', '')
 CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', CELERY_BROKER_URL)
+
+GROQ_API_KEY = os.getenv('GROQ_API_KEY', '')
+GROQ_BASE_URL = os.getenv('GROQ_BASE_URL', 'https://api.groq.com/openai/v1')
+GROQ_TIMEOUT = int(os.getenv('GROQ_TIMEOUT', '60'))
+GROQ_TRANSCRIPTION_MODEL = os.getenv('GROQ_TRANSCRIPTION_MODEL', 'whisper-large-v3-turbo')
 
 # Internationalization
 # https://docs.djangoproject.com/en/6.0/topics/i18n/
