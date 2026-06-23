@@ -331,7 +331,7 @@ def _servicios_promocion_data(request):
     ] for d in detalles]
     return headers, keys, rows
 
-
+#caso de uso 19 generar reportes 
 @extend_schema(tags=['CU21 - Reportes'], parameters=_common_report_params())
 class ReporteVentasView(APIView):
     permission_classes = [EsAdmin]
@@ -341,7 +341,7 @@ class ReporteVentasView(APIView):
         registrar_bitacora(request, 'REPORTE_VENTAS', 'Descarga de reporte de ventas.')
         return report_response('Reporte de ventas', headers, rows, request.query_params.get('formato'), 'reporte-ventas')
 
-
+#caso de uso 19
 @extend_schema(tags=['CU21 - Reportes'], parameters=_common_report_params())
 class ReporteProductosVendidosView(APIView):
     permission_classes = [EsAdmin]
