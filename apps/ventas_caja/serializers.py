@@ -9,6 +9,7 @@ from .models import (
     DetalleVenta,
     MetodoPago,
     MovimientoCaja,
+    PagoStripe,
     PagoVenta,
     PlanComision,
     Venta,
@@ -370,6 +371,25 @@ class PagoVentaSerializer(serializers.ModelSerializer):
         read_only_fields = ['estado', 'fecha_registro']
 
 
+class PagoStripeSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PagoStripe
+        fields = [
+            'id_pago_stripe',
+            'id_venta',
+            'stripe_payment_intent_id',
+            'client_secret',
+            'stripe_status',
+            'estado',
+            'amount',
+            'currency',
+            'fecha_creacion',
+            'fecha_confirmacion',
+            'fecha_actualizacion',
+        ]
+        read_only_fields = fields
+
+
 class ComisionVentaSerializer(serializers.ModelSerializer):
     barbero_nombre = serializers.SerializerMethodField(read_only=True)
 
@@ -397,6 +417,7 @@ class VentaSerializer(serializers.ModelSerializer):
     cajero_nombre = serializers.SerializerMethodField(read_only=True)
     detalles = DetalleVentaSerializer(many=True, read_only=True)
     pagos = PagoVentaSerializer(many=True, read_only=True)
+    pagos_stripe = PagoStripeSerializer(many=True, read_only=True)
     comisiones = ComisionVentaSerializer(many=True, read_only=True)
 
     class Meta:
@@ -418,6 +439,7 @@ class VentaSerializer(serializers.ModelSerializer):
             'fecha_actualizacion',
             'detalles',
             'pagos',
+            'pagos_stripe',
             'comisiones',
         ]
         read_only_fields = [

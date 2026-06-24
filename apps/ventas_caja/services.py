@@ -1,5 +1,11 @@
 from decimal import Decimal
+import hashlib
+import hmac
+import json
+import time
 
+import requests
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Sum
 from django.utils import timezone
@@ -16,10 +22,14 @@ from .models import (
     DetalleVenta,
     MetodoPago,
     MovimientoCaja,
+    PagoStripe,
     PagoVenta,
     PlanComision,
     Venta,
 )
+
+
+STRIPE_API_BASE = 'https://api.stripe.com/v1'
 
 
 def _obtener_usuario(codigo, campo):
@@ -27,6 +37,28 @@ def _obtener_usuario(codigo, campo):
         return Usuario.objects.select_related('id_rol').get(pk=codigo)
     except Usuario.DoesNotExist:
         raise ValidationError({campo: 'Usuario no encontrado.'})
+
+
+def _decimal_a_minor_units(monto):
+    return int((monto * Decimal('100')).quantize(Decimal('1')))
+
+
+def _obtener_metodo_pago_stripe():
+    metodo = MetodoPago.objects.filter(nombre__iexact='Stripe').first()
+    if not metodo:
+        metodo = MetodoPago.objects.create(
+            nombre='Stripe',
+            descripcion='Pago con tarjeta mediante Stripe',
+            requiere_referencia=True,
+            estado='ACTIVO',
+        )
+    if metodo.estado != 'ACTIVO':
+        metodo.estado = 'ACTIVO'
+        metodo.save(update_fields=['estado', 'fecha_actualizacion'])
+    if not metodo.requiere_referencia:
+        metodo.requiere_referencia = True
+        metodo.save(update_fields=['requiere_referencia', 'fecha_actualizacion'])
+    return metodo
 
 
 def _naturaleza_por_tipo(tipo_movimiento):
@@ -422,6 +454,168 @@ def confirmar_venta(venta_id, pagos_data, usuario):
     venta.estado = 'PAGADA'
     venta.save(update_fields=['estado', 'fecha_actualizacion'])
     return venta
+
+
+@transaction.atomic
+def crear_payment_intent_stripe(venta_id, usuario):
+    secret_key = getattr(settings, 'STRIPE_SECRET_KEY', '')
+    currency = getattr(settings, 'STRIPE_CURRENCY', 'bob').lower()
+    if not secret_key:
+        raise ValidationError({'stripe': 'STRIPE_SECRET_KEY no esta configurado.'})
+
+    venta = Venta.objects.select_for_update().get(pk=venta_id)
+    if venta.estado not in ['BORRADOR', 'PENDIENTE_PAGO']:
+        raise ValidationError('Solo se puede crear pago Stripe para ventas en borrador o pendientes de pago.')
+
+    detalles = list(venta.detalles.all())
+    if not detalles:
+        raise ValidationError('No se puede cobrar una venta sin detalles.')
+
+    if not Caja.caja_abierta():
+        raise ValidationError('Debe existir una caja abierta antes de iniciar un pago con Stripe.')
+
+    venta.recalcular_totales()
+    if venta.total <= 0:
+        raise ValidationError('El total de la venta debe ser mayor a 0.')
+
+    amount = _decimal_a_minor_units(venta.total)
+    data = {
+        'amount': amount,
+        'currency': currency,
+        'automatic_payment_methods[enabled]': 'true',
+        'metadata[id_venta]': str(venta.id_venta),
+        'metadata[codigo_cajero]': usuario.codigo if usuario else '',
+        'description': f'Venta #{venta.id_venta} - Blessed Barber',
+    }
+    idempotency_key = f'venta-{venta.id_venta}-stripe-{amount}-{currency}'
+
+    try:
+        response = requests.post(
+            f'{STRIPE_API_BASE}/payment_intents',
+            data=data,
+            auth=(secret_key, ''),
+            headers={'Idempotency-Key': idempotency_key},
+            timeout=20,
+        )
+    except requests.RequestException:
+        raise ValidationError({'stripe': 'No se pudo conectar con Stripe.'})
+
+    try:
+        stripe_data = response.json()
+    except ValueError:
+        stripe_data = {}
+
+    if response.status_code >= 400:
+        mensaje = stripe_data.get('error', {}).get('message') or 'Stripe rechazo la solicitud.'
+        raise ValidationError({'stripe': mensaje})
+
+    pago_stripe, _ = PagoStripe.objects.update_or_create(
+        stripe_payment_intent_id=stripe_data['id'],
+        defaults={
+            'id_venta': venta,
+            'client_secret': stripe_data.get('client_secret', ''),
+            'stripe_status': stripe_data.get('status', ''),
+            'estado': 'REQUIERE_PAGO',
+            'amount': stripe_data.get('amount', amount),
+            'currency': stripe_data.get('currency', currency),
+            'raw_response': stripe_data,
+        },
+    )
+
+    if venta.estado != 'PENDIENTE_PAGO':
+        venta.estado = 'PENDIENTE_PAGO'
+        venta.save(update_fields=['estado', 'fecha_actualizacion'])
+
+    return pago_stripe
+
+
+def verificar_firma_stripe(payload, signature_header):
+    webhook_secret = getattr(settings, 'STRIPE_WEBHOOK_SECRET', '')
+    if not webhook_secret:
+        raise ValidationError({'stripe': 'STRIPE_WEBHOOK_SECRET no esta configurado.'})
+    if not signature_header:
+        raise ValidationError({'stripe': 'Falta Stripe-Signature.'})
+
+    partes = {}
+    for item in signature_header.split(','):
+        if '=' not in item:
+            continue
+        key, value = item.split('=', 1)
+        partes.setdefault(key, []).append(value)
+
+    timestamp = partes.get('t', [None])[0]
+    firmas = partes.get('v1', [])
+    if not timestamp or not firmas:
+        raise ValidationError({'stripe': 'Firma Stripe invalida.'})
+
+    try:
+        timestamp_int = int(timestamp)
+    except ValueError:
+        raise ValidationError({'stripe': 'Timestamp Stripe invalido.'})
+
+    if abs(time.time() - timestamp_int) > 300:
+        raise ValidationError({'stripe': 'Firma Stripe expirada.'})
+
+    signed_payload = f'{timestamp}.'.encode('utf-8') + payload
+    expected = hmac.new(webhook_secret.encode('utf-8'), signed_payload, hashlib.sha256).hexdigest()
+    if not any(hmac.compare_digest(expected, firma) for firma in firmas):
+        raise ValidationError({'stripe': 'Firma Stripe no coincide.'})
+
+
+@transaction.atomic
+def procesar_webhook_stripe(payload, signature_header):
+    verificar_firma_stripe(payload, signature_header)
+
+    try:
+        event = json.loads(payload.decode('utf-8'))
+    except ValueError:
+        raise ValidationError({'stripe': 'Payload Stripe invalido.'})
+
+    event_type = event.get('type')
+    payment_intent = event.get('data', {}).get('object', {})
+    payment_intent_id = payment_intent.get('id')
+    if not payment_intent_id:
+        return {'procesado': False, 'motivo': 'Evento sin PaymentIntent.'}
+
+    pago_stripe = PagoStripe.objects.select_for_update().select_related('id_venta', 'id_venta__codigo_cajero').filter(
+        stripe_payment_intent_id=payment_intent_id
+    ).first()
+    if not pago_stripe:
+        return {'procesado': False, 'motivo': 'PaymentIntent no vinculado a una venta.'}
+
+    pago_stripe.stripe_status = payment_intent.get('status', pago_stripe.stripe_status)
+    pago_stripe.raw_response = payment_intent
+
+    if event_type == 'payment_intent.succeeded':
+        if pago_stripe.id_venta.estado != 'PAGADA':
+            metodo = _obtener_metodo_pago_stripe()
+            monto = Decimal(pago_stripe.amount) / Decimal('100')
+            confirmar_venta(
+                pago_stripe.id_venta_id,
+                [{
+                    'id_metodo_pago': metodo.id_metodo_pago,
+                    'monto': monto,
+                    'referencia': payment_intent_id,
+                }],
+                pago_stripe.id_venta.codigo_cajero,
+            )
+        pago_stripe.estado = 'EXITOSO'
+        pago_stripe.fecha_confirmacion = timezone.now()
+    elif event_type == 'payment_intent.payment_failed':
+        pago_stripe.estado = 'FALLIDO'
+    elif event_type == 'payment_intent.canceled':
+        pago_stripe.estado = 'CANCELADO'
+    elif event_type == 'payment_intent.processing':
+        pago_stripe.estado = 'PROCESANDO'
+
+    pago_stripe.save(update_fields=[
+        'stripe_status',
+        'estado',
+        'raw_response',
+        'fecha_confirmacion',
+        'fecha_actualizacion',
+    ])
+    return {'procesado': True, 'evento': event_type, 'payment_intent_id': payment_intent_id}
 
 
 @transaction.atomic

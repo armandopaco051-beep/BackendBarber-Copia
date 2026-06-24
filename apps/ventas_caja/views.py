@@ -3,6 +3,7 @@ from django.db import transaction
 from django.db.models import Q
 from rest_framework.exceptions import ValidationError
 from rest_framework import status
+from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -20,6 +21,7 @@ from .serializers import (
     MovimientoCajaCrearSerializer,
     MovimientoCajaSerializer,
     PlanComisionSerializer,
+    PagoStripeSerializer,
     VentaAnularSerializer,
     VentaConfirmarSerializer,
     VentaCrearSerializer,
@@ -29,7 +31,9 @@ from .services import (
     anular_movimiento_caja,
     anular_venta,
     confirmar_venta,
+    crear_payment_intent_stripe,
     crear_venta_borrador,
+    procesar_webhook_stripe,
     registrar_movimiento_caja_manual,
     resumen_caja_abierta,
 )
@@ -810,6 +814,75 @@ class VentaConfirmarView(APIView):
             {'mensaje': 'Venta confirmada correctamente.', 'venta': VentaSerializer(venta).data},
             status=status.HTTP_200_OK
         )
+
+
+@extend_schema(tags=["CU19 - Gestionar Ventas"])
+class VentaStripePaymentIntentView(APIView):
+    permission_classes = [TienePermiso]
+    permiso_requerido = 'ventas.crear'
+    serializer_class = PagoStripeSerializer
+
+    @extend_schema(
+        summary="Crear intento de pago Stripe para una venta",
+        request=None,
+        responses={
+            201: PagoStripeSerializer,
+            400: OpenApiResponse(description="Venta no cobrable o Stripe no configurado."),
+            404: OpenApiResponse(description="Venta no encontrada."),
+        }
+    )
+    def post(self, request, id_venta):
+        usuario = getattr(request, 'usuario_actual', None)
+        try:
+            pago_stripe = crear_payment_intent_stripe(id_venta, usuario)
+            venta = Venta.consultar().get(pk=id_venta)
+            registrar_bitacora(
+                request,
+                'CREAR_PAGO_STRIPE',
+                f'PaymentIntent Stripe creado para venta: {venta.id_venta}.'
+            )
+        except Venta.DoesNotExist:
+            return Response({'error': 'Venta no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        except ValidationError as exc:
+            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {
+                'mensaje': 'Intento de pago Stripe creado correctamente.',
+                'stripe': PagoStripeSerializer(pago_stripe).data,
+                'client_secret': pago_stripe.client_secret,
+                'payment_intent_id': pago_stripe.stripe_payment_intent_id,
+                'amount': pago_stripe.amount,
+                'currency': pago_stripe.currency,
+                'venta': VentaSerializer(venta).data,
+            },
+            status=status.HTTP_201_CREATED
+        )
+
+
+@extend_schema(tags=["CU19 - Gestionar Ventas"])
+class StripeWebhookView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    @extend_schema(
+        summary="Webhook Stripe para confirmar pagos",
+        request=None,
+        responses={
+            200: OpenApiResponse(description="Evento recibido."),
+            400: OpenApiResponse(description="Firma o payload invalido."),
+        },
+        auth=[],
+    )
+    def post(self, request):
+        signature_header = request.META.get('HTTP_STRIPE_SIGNATURE', '')
+        payload = request._request.body
+        try:
+            resultado = procesar_webhook_stripe(payload, signature_header)
+        except ValidationError as exc:
+            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({'received': True, **resultado}, status=status.HTTP_200_OK)
 
 
 @extend_schema(tags=["CU19 - Gestionar Ventas"])

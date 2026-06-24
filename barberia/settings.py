@@ -189,6 +189,10 @@ VAPID_PRIVATE_KEY_PEM = os.getenv('VAPID_PRIVATE_KEY_PEM', '')
 CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', '')
 CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', CELERY_BROKER_URL)
 
+STRIPE_SECRET_KEY = os.getenv('STRIPE_SECRET_KEY', '')
+STRIPE_WEBHOOK_SECRET = os.getenv('STRIPE_WEBHOOK_SECRET', '')
+STRIPE_CURRENCY = os.getenv('STRIPE_CURRENCY', 'bob').lower()
+
 GROQ_API_KEY = os.getenv('GROQ_API_KEY', '')
 GROQ_BASE_URL = os.getenv('GROQ_BASE_URL', 'https://api.groq.com/openai/v1')
 GROQ_TIMEOUT = int(os.getenv('GROQ_TIMEOUT', '60'))

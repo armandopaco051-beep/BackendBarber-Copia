@@ -465,6 +465,44 @@ class PagoVenta(models.Model):
         return f"Pago {self.monto} - Venta {self.id_venta_id}"
 
 
+class PagoStripe(models.Model):
+    ESTADOS = (
+        ('CREADO', 'Creado'),
+        ('REQUIERE_PAGO', 'Requiere pago'),
+        ('PROCESANDO', 'Procesando'),
+        ('EXITOSO', 'Exitoso'),
+        ('FALLIDO', 'Fallido'),
+        ('CANCELADO', 'Cancelado'),
+    )
+
+    id_pago_stripe = models.AutoField(primary_key=True)
+    id_venta = models.ForeignKey(
+        Venta,
+        on_delete=models.CASCADE,
+        db_column='id_venta',
+        related_name='pagos_stripe'
+    )
+    stripe_payment_intent_id = models.CharField(max_length=120, unique=True)
+    client_secret = models.CharField(max_length=255, blank=True)
+    stripe_status = models.CharField(max_length=50, blank=True)
+    estado = models.CharField(max_length=20, choices=ESTADOS, default='CREADO')
+    amount = models.PositiveIntegerField()
+    currency = models.CharField(max_length=10)
+    raw_response = models.JSONField(default=dict, blank=True)
+    fecha_creacion = models.DateTimeField(auto_now_add=True)
+    fecha_confirmacion = models.DateTimeField(null=True, blank=True)
+    fecha_actualizacion = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'ventas_caja_pago_stripe'
+        verbose_name = 'Pago Stripe'
+        verbose_name_plural = 'Pagos Stripe'
+        ordering = ['-fecha_creacion']
+
+    def __str__(self):
+        return f"Stripe {self.stripe_payment_intent_id} - Venta {self.id_venta_id}"
+
+
 class ComisionVenta(models.Model):
     ESTADOS_PAGO = (
         ('PENDIENTE', 'Pendiente'),

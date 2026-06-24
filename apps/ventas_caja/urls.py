@@ -19,6 +19,8 @@ from .views import (
     VentaComprobanteView,
     VentaDetalleView,
     VentaListCreateView,
+    VentaStripePaymentIntentView,
+    StripeWebhookView,
 )
 
 
@@ -41,6 +43,8 @@ urlpatterns = [
     path('ventas/', VentaListCreateView.as_view(), name='venta-list-create'),
     path('ventas/<int:id_venta>/', VentaDetalleView.as_view(), name='venta-detalle'),
     path('ventas/<int:id_venta>/confirmar/', VentaConfirmarView.as_view(), name='venta-confirmar'),
+    path('ventas/<int:id_venta>/stripe/payment-intent/', VentaStripePaymentIntentView.as_view(), name='venta-stripe-payment-intent'),
     path('ventas/<int:id_venta>/anular/', VentaAnularView.as_view(), name='venta-anular'),
     path('ventas/<int:id_venta>/comprobante/', VentaComprobanteView.as_view(), name='venta-comprobante'),
+    path('stripe/webhook/', StripeWebhookView.as_view(), name='stripe-webhook'),
 ]
