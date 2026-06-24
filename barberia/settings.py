@@ -31,16 +31,20 @@ DEBUG = os.getenv('DEBUG', 'False') == 'True'
 
 ALLOWED_HOSTS = [
     'backend-barberia-ohjh.onrender.com',
+    'backendbarber-copia.onrender.com',
     'localhost',
     '127.0.0.1',
     '.onrender.com',
     'frontend-barberia-sage.vercel.app',
+    'frontend-baber-copia.vercel.app',
     '.ngrok-free.dev',
     'deduct-demystify-masses.ngrok-free.dev',
 ]
 
 CSRF_TRUSTED_ORIGINS = [
     'https://backend-barberia-ohjh.onrender.com',
+    'https://backendbarber-copia.onrender.com',
+    'https://frontend-baber-copia.vercel.app',
     'https://*.onrender.com',
     'https://*.ngrok-free.dev',
     'https://deduct-demystify-masses.ngrok-free.dev',
@@ -169,6 +173,7 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",  # Create React App
     "http://127.0.0.1:3000",
     "https://frontend-barberia-sage.vercel.app",
+    "https://frontend-baber-copia.vercel.app",
 
 ]
 
