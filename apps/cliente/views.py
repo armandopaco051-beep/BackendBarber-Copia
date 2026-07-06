@@ -8,9 +8,16 @@ from rest_framework.views import APIView
 from apps.citas.models import Cita
 from apps.citas.serializers import CitaSerializer, ESTADOS_NO_BLOQUEAN_HORARIO
 from apps.citas.views import DisponibilidadBarberoView
+from apps.seguridad.permissions import EsAdmin
 from apps.seguridad.views import registrar_bitacora
 
-from .serializers import ClienteCitaSerializer
+from .models import EncuestaSatisfaccion, ReclamoSugerencia
+from .serializers import (
+    ClienteCitaSerializer,
+    EncuestaSatisfaccionSerializer,
+    ReclamoSugerenciaSerializer,
+    RespuestaReclamoSugerenciaSerializer,
+)
 
 
 class EsCliente(BasePermission):
@@ -20,6 +27,15 @@ class EsCliente(BasePermission):
     def has_permission(self, request, view):
         usuario = getattr(request, 'usuario_actual', None)
         return bool(usuario and usuario.es_cliente)
+
+
+class EsClienteOAdmin(BasePermission):
+    # Permite registrar al cliente y hacer seguimiento al administrador.
+    message = 'Solo clientes o administradores autenticados pueden acceder.'
+
+    def has_permission(self, request, view):
+        usuario = getattr(request, 'usuario_actual', None)
+        return bool(usuario and (usuario.es_cliente or usuario.es_admin))
 
 
 def obtener_cliente_actual(request):
@@ -215,4 +231,368 @@ class ClienteCitaDetalleView(APIView):
             serializer.save()
             registrar_bitacora(request, 'CLIENTE_CANCELAR_CITA', f'Cliente cancelo cita: {cita.id_cita}.', cliente)
             return Response({'mensaje': 'Cita cancelada correctamente.'}, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+# CRUD de CU30 Gestionar encuesta de satisfaccion.
+# El administrador crea encuestas con preguntas y opciones para clientes atendidos.
+@extend_schema(tags=['CU30 - Gestionar Encuestas de Satisfaccion'])
+class EncuestaSatisfaccionListCreateView(APIView):
+    permission_classes = [EsAdmin]
+
+    @extend_schema(
+        summary='Listar encuestas de satisfaccion',
+        description='Lista encuestas. Permite filtrar por estado y titulo.',
+        responses={200: EncuestaSatisfaccionSerializer(many=True)}
+    )
+    def get(self, request):
+        # Muestra las encuestas registradas en el modulo administrativo.
+        encuestas = EncuestaSatisfaccion.consultar().all()
+        estado_filtro = request.query_params.get('estado')
+        titulo = request.query_params.get('titulo')
+
+        if estado_filtro:
+            encuestas = encuestas.filter(estado=estado_filtro.upper())
+        if titulo:
+            encuestas = encuestas.filter(titulo__icontains=titulo)
+
+        registrar_bitacora(request, 'CONSULTAR_ENCUESTAS_SATISFACCION', 'Consulta de encuestas de satisfaccion.')
+        return Response(EncuestaSatisfaccionSerializer(encuestas, many=True).data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        summary='Crear encuesta de satisfaccion',
+        request=EncuestaSatisfaccionSerializer,
+        responses={
+            201: OpenApiResponse(description='Encuesta registrada.'),
+            400: OpenApiResponse(description='Datos invalidos.'),
+        },
+        examples=[
+            OpenApiExample(
+                'Crear encuesta',
+                value={
+                    'titulo': 'Encuesta post atencion',
+                    'descripcion': 'Evalua puntualidad, limpieza y experiencia.',
+                    'estado': 'BORRADOR',
+                    'preguntas': [
+                        {
+                            'texto': 'Como calificas la puntualidad?',
+                            'tipo_respuesta': 'ESCALA',
+                            'orden': 1,
+                            'obligatoria': True,
+                            'opciones': [
+                                {'texto': '1', 'valor': 1, 'orden': 1},
+                                {'texto': '2', 'valor': 2, 'orden': 2},
+                                {'texto': '3', 'valor': 3, 'orden': 3},
+                                {'texto': '4', 'valor': 4, 'orden': 4},
+                                {'texto': '5', 'valor': 5, 'orden': 5},
+                            ],
+                        }
+                    ],
+                },
+                request_only=True,
+            )
+        ]
+    )
+    def post(self, request):
+        # Guarda la encuesta completa con sus preguntas y opciones.
+        serializer = EncuestaSatisfaccionSerializer(data=request.data)
+        if serializer.is_valid():
+            encuesta = serializer.save()
+            registrar_bitacora(request, 'CREAR_ENCUESTA_SATISFACCION', f'Encuesta creada: {encuesta.id_encuesta}.')
+            return Response(
+                {'mensaje': 'Encuesta de satisfaccion registrada correctamente.', 'encuesta': EncuestaSatisfaccionSerializer(encuesta).data},
+                status=status.HTTP_201_CREATED
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@extend_schema(tags=['CU30 - Gestionar Encuestas de Satisfaccion'])
+class EncuestaSatisfaccionDetalleView(APIView):
+    permission_classes = [EsAdmin]
+
+    def _get_encuesta(self, id_encuesta):
+        # Obtiene la encuesta con preguntas y opciones para detalle o edicion.
+        return EncuestaSatisfaccion.consultar().filter(pk=id_encuesta).first()
+
+    @extend_schema(
+        summary='Ver detalle de encuesta de satisfaccion',
+        responses={200: EncuestaSatisfaccionSerializer, 404: OpenApiResponse(description='No encontrada.')}
+    )
+    def get(self, request, id_encuesta):
+        encuesta = self._get_encuesta(id_encuesta)
+        if not encuesta:
+            return Response({'error': 'Encuesta de satisfaccion no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(EncuestaSatisfaccionSerializer(encuesta).data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        summary='Actualizar encuesta de satisfaccion',
+        request=EncuestaSatisfaccionSerializer,
+        responses={
+            200: OpenApiResponse(description='Encuesta actualizada.'),
+            400: OpenApiResponse(description='Datos invalidos.'),
+            404: OpenApiResponse(description='No encontrada.'),
+        }
+    )
+    def put(self, request, id_encuesta):
+        # Actualiza datos generales y, si se envian preguntas, reemplaza su estructura completa.
+        encuesta = self._get_encuesta(id_encuesta)
+        if not encuesta:
+            return Response({'error': 'Encuesta de satisfaccion no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = EncuestaSatisfaccionSerializer(encuesta, data=request.data, partial=True)
+        if serializer.is_valid():
+            encuesta = serializer.save()
+            registrar_bitacora(request, 'ACTUALIZAR_ENCUESTA_SATISFACCION', f'Encuesta actualizada: {encuesta.id_encuesta}.')
+            return Response(
+                {'mensaje': 'Encuesta de satisfaccion actualizada correctamente.', 'encuesta': EncuestaSatisfaccionSerializer(encuesta).data},
+                status=status.HTTP_200_OK
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @extend_schema(
+        summary='Inactivar encuesta de satisfaccion',
+        description='No elimina la encuesta; la deja como INACTIVO.',
+        responses={200: OpenApiResponse(description='Encuesta inactivada.'), 404: OpenApiResponse(description='No encontrada.')}
+    )
+    def delete(self, request, id_encuesta):
+        # Retira la encuesta para que deje de estar disponible a clientes atendidos.
+        encuesta = self._get_encuesta(id_encuesta)
+        if not encuesta:
+            return Response({'error': 'Encuesta de satisfaccion no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        encuesta.cambiar_estado('INACTIVO')
+        registrar_bitacora(request, 'INACTIVAR_ENCUESTA_SATISFACCION', f'Encuesta inactivada: {encuesta.id_encuesta}.')
+        return Response({'mensaje': 'Encuesta de satisfaccion inactivada correctamente.'}, status=status.HTTP_200_OK)
+
+
+@extend_schema(tags=['CU30 - Gestionar Encuestas de Satisfaccion'])
+class EncuestaSatisfaccionActivarView(APIView):
+    permission_classes = [EsAdmin]
+
+    @extend_schema(
+        summary='Activar encuesta de satisfaccion',
+        responses={200: OpenApiResponse(description='Encuesta activada.'), 404: OpenApiResponse(description='No encontrada.')}
+    )
+    def post(self, request, id_encuesta):
+        # Publica la encuesta para clientes atendidos.
+        encuesta = EncuestaSatisfaccion.consultar().filter(pk=id_encuesta).first()
+        if not encuesta:
+            return Response({'error': 'Encuesta de satisfaccion no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        encuesta.cambiar_estado('ACTIVO')
+        registrar_bitacora(request, 'ACTIVAR_ENCUESTA_SATISFACCION', f'Encuesta activada: {encuesta.id_encuesta}.')
+        return Response(
+            {'mensaje': 'Encuesta de satisfaccion activada correctamente.', 'encuesta': EncuestaSatisfaccionSerializer(encuesta).data},
+            status=status.HTTP_200_OK
+        )
+
+
+# CRUD de CU31 Gestionar reclamos y sugerencias.
+# Cliente registra solicitudes; administrador consulta y actualiza seguimiento.
+@extend_schema(tags=['CU31 - Gestionar Reclamos y Sugerencias'])
+class ReclamoSugerenciaListCreateView(APIView):
+    permission_classes = [EsClienteOAdmin]
+
+    def _filtrar_por_usuario(self, queryset, request):
+        # Admin ve todas las solicitudes; cliente solo las propias.
+        usuario = getattr(request, 'usuario_actual', None)
+        if not usuario:
+            return queryset.none()
+        if usuario.es_admin:
+            return queryset
+        return queryset.filter(codigo_cliente=usuario)
+
+    @extend_schema(
+        summary='Listar reclamos y sugerencias',
+        description='Cliente ve sus solicitudes; administrador ve todas y puede filtrar.',
+        responses={200: ReclamoSugerenciaSerializer(many=True)}
+    )
+    def get(self, request):
+        solicitudes = self._filtrar_por_usuario(ReclamoSugerencia.consultar().all(), request)
+        tipo = request.query_params.get('tipo_solicitud')
+        estado_filtro = request.query_params.get('estado')
+        codigo_cliente = request.query_params.get('codigo_cliente')
+        id_cita = request.query_params.get('id_cita')
+        id_servicio = request.query_params.get('id_servicio')
+
+        if tipo:
+            solicitudes = solicitudes.filter(tipo_solicitud=tipo.upper())
+        if estado_filtro:
+            solicitudes = solicitudes.filter(estado=estado_filtro.upper())
+        if codigo_cliente:
+            solicitudes = solicitudes.filter(codigo_cliente_id=codigo_cliente)
+        if id_cita:
+            solicitudes = solicitudes.filter(id_cita_id=id_cita)
+        if id_servicio:
+            solicitudes = solicitudes.filter(id_servicio_id=id_servicio)
+
+        registrar_bitacora(request, 'CONSULTAR_RECLAMOS_SUGERENCIAS', 'Consulta de reclamos y sugerencias.')
+        return Response(ReclamoSugerenciaSerializer(solicitudes, many=True).data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        summary='Registrar reclamo o sugerencia',
+        request=ReclamoSugerenciaSerializer,
+        responses={
+            201: OpenApiResponse(description='Solicitud registrada.'),
+            400: OpenApiResponse(description='Datos invalidos.'),
+            403: OpenApiResponse(description='Usuario sin permiso.'),
+        },
+        examples=[
+            OpenApiExample(
+                'Registrar reclamo',
+                value={
+                    'tipo_solicitud': 'RECLAMO',
+                    'detalle': 'La atencion inicio con retraso.',
+                    'id_cita': 1,
+                    'id_servicio': 2,
+                },
+                request_only=True,
+            )
+        ]
+    )
+    def post(self, request):
+        # Solo clientes pueden registrar solicitudes desde este caso de uso.
+        usuario = getattr(request, 'usuario_actual', None)
+        if not usuario or not usuario.es_cliente:
+            return Response({'error': 'Solo clientes autenticados pueden registrar reclamos o sugerencias.'}, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = ReclamoSugerenciaSerializer(data=request.data, context={'request': request})
+        if serializer.is_valid():
+            solicitud = serializer.save()
+            registrar_bitacora(request, 'CREAR_RECLAMO_SUGERENCIA', f'Solicitud registrada: {solicitud.id_solicitud}.', usuario)
+            return Response(
+                {
+                    'mensaje': 'Reclamo o sugerencia registrado correctamente.',
+                    'solicitud': ReclamoSugerenciaSerializer(solicitud).data,
+                },
+                status=status.HTTP_201_CREATED
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@extend_schema(tags=['CU31 - Gestionar Reclamos y Sugerencias'])
+class ReclamoSugerenciaDetalleView(APIView):
+    permission_classes = [EsClienteOAdmin]
+
+    def _get_solicitud(self, request, id_solicitud):
+        # Aplica visibilidad por rol al consultar el detalle.
+        usuario = getattr(request, 'usuario_actual', None)
+        queryset = ReclamoSugerencia.consultar()
+        if not usuario:
+            return None
+        if usuario.es_cliente:
+            queryset = queryset.filter(codigo_cliente=usuario)
+        elif not usuario.es_admin:
+            return None
+        return queryset.filter(pk=id_solicitud).first()
+
+    @extend_schema(
+        summary='Ver detalle de reclamo o sugerencia',
+        responses={200: ReclamoSugerenciaSerializer, 404: OpenApiResponse(description='No encontrada.')}
+    )
+    def get(self, request, id_solicitud):
+        solicitud = self._get_solicitud(request, id_solicitud)
+        if not solicitud:
+            return Response({'error': 'Solicitud no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(ReclamoSugerenciaSerializer(solicitud).data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        summary='Actualizar seguimiento de reclamo o sugerencia',
+        description='El administrador puede cambiar estado, respuesta y datos relacionados.',
+        request=ReclamoSugerenciaSerializer,
+        responses={
+            200: OpenApiResponse(description='Solicitud actualizada.'),
+            400: OpenApiResponse(description='Datos invalidos.'),
+            403: OpenApiResponse(description='Usuario sin permiso.'),
+            404: OpenApiResponse(description='No encontrada.'),
+        }
+    )
+    def put(self, request, id_solicitud):
+        # Solo administrador hace seguimiento formal de la solicitud.
+        usuario = getattr(request, 'usuario_actual', None)
+        if not usuario or not usuario.es_admin:
+            return Response({'error': 'Solo el administrador puede actualizar solicitudes.'}, status=status.HTTP_403_FORBIDDEN)
+
+        solicitud = self._get_solicitud(request, id_solicitud)
+        if not solicitud:
+            return Response({'error': 'Solicitud no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = ReclamoSugerenciaSerializer(solicitud, data=request.data, partial=True, context={'request': request})
+        if serializer.is_valid():
+            solicitud = serializer.save()
+            registrar_bitacora(request, 'ACTUALIZAR_RECLAMO_SUGERENCIA', f'Solicitud actualizada: {solicitud.id_solicitud}.')
+            return Response(
+                {
+                    'mensaje': 'Solicitud actualizada correctamente.',
+                    'solicitud': ReclamoSugerenciaSerializer(solicitud).data,
+                },
+                status=status.HTTP_200_OK
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @extend_schema(
+        summary='Inactivar reclamo o sugerencia',
+        description='No elimina la solicitud; cambia su estado a INACTIVO.',
+        responses={
+            200: OpenApiResponse(description='Solicitud inactivada.'),
+            403: OpenApiResponse(description='Usuario sin permiso.'),
+            404: OpenApiResponse(description='No encontrada.'),
+        }
+    )
+    def delete(self, request, id_solicitud):
+        usuario = getattr(request, 'usuario_actual', None)
+        if not usuario or not usuario.es_admin:
+            return Response({'error': 'Solo el administrador puede inactivar solicitudes.'}, status=status.HTTP_403_FORBIDDEN)
+
+        solicitud = self._get_solicitud(request, id_solicitud)
+        if not solicitud:
+            return Response({'error': 'Solicitud no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        solicitud.cambiar_estado('INACTIVO')
+        registrar_bitacora(request, 'INACTIVAR_RECLAMO_SUGERENCIA', f'Solicitud inactivada: {solicitud.id_solicitud}.')
+        return Response({'mensaje': 'Solicitud inactivada correctamente.'}, status=status.HTTP_200_OK)
+
+
+@extend_schema(tags=['CU32 - Gestionar Respuesta a Reclamos'])
+class RespuestaReclamoSugerenciaView(APIView):
+    permission_classes = [EsAdmin]
+
+    def _get_solicitud(self, id_solicitud):
+        # El administrador puede responder cualquier solicitud registrada.
+        return ReclamoSugerencia.consultar().filter(pk=id_solicitud).first()
+
+    @extend_schema(
+        summary='Responder reclamo o sugerencia',
+        description='Registra la respuesta o accion tomada y cambia el estado a revisado, resuelto u otro estado de seguimiento.',
+        request=RespuestaReclamoSugerenciaSerializer,
+        responses={
+            200: OpenApiResponse(description='Solicitud respondida.'),
+            400: OpenApiResponse(description='Respuesta vacia o estado invalido.'),
+            404: OpenApiResponse(description='Solicitud inexistente.'),
+        },
+        examples=[
+            OpenApiExample(
+                'Responder solicitud',
+                value={
+                    'respuesta_admin': 'Se contacto al cliente y se ofrecio una nueva atencion sin costo.',
+                    'estado': 'RESUELTO',
+                },
+                request_only=True,
+            )
+        ]
+    )
+    def post(self, request, id_solicitud):
+        # Flujo CU32: revisar detalle, registrar respuesta y actualizar estado.
+        solicitud = self._get_solicitud(id_solicitud)
+        if not solicitud:
+            return Response({'error': 'Solicitud no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = RespuestaReclamoSugerenciaSerializer(solicitud, data=request.data)
+        if serializer.is_valid():
+            solicitud = serializer.save()
+            registrar_bitacora(request, 'RESPONDER_RECLAMO_SUGERENCIA', f'Solicitud respondida: {solicitud.id_solicitud}.')
+            return Response(
+                {
+                    'mensaje': 'Respuesta registrada correctamente.',
+                    'solicitud': ReclamoSugerenciaSerializer(solicitud).data,
+                },
+                status=status.HTTP_200_OK
+            )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

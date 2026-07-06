@@ -1,6 +1,9 @@
 from django.urls import path
 
 from .views import (
+    AsignacionEstacionTrabajoActivarView,
+    AsignacionEstacionTrabajoDetalleView,
+    AsignacionEstacionTrabajoListCreateView,
     AtencionAgregarServiciosView,
     AtencionCancelarView,
     AtencionDetalleView,
@@ -11,11 +14,16 @@ from .views import (
     AtencionServicioListView,
     BarberoServicioDetalleView,
     BarberoServicioListCreateView,
+    BarberosActivosEstacionView,
     CitaAgregarServiciosView,
     CitaDetalleView,
     CitaListCreateView,
     DisponibilidadBarberoView,
     EstadoCitaListView,
+    EstacionTrabajoActivarView,
+    EstacionTrabajoDetalleView,
+    EstacionTrabajoListCreateView,
+    EstacionesDisponiblesAsignacionView,
     HistorialEstadoCitaListView,
     PromocionDetalleView,
     PromocionListCreateView,
@@ -64,5 +72,23 @@ urlpatterns = [
     path('atenciones/<int:id_atencion>/cancelar/', AtencionCancelarView.as_view(), name='atencion-cancelar'),
     path('promociones/', PromocionListCreateView.as_view(), name='promocion-list-create'),
     path('promociones/<int:id_promocion>/', PromocionDetalleView.as_view(), name='promocion-detalle'),
+
+    # CU26: estaciones de trabajo.
+    # GET/POST lista o registra estaciones; GET/PUT/DELETE gestiona una estacion;
+    # POST activar permite volver a habilitar una estacion inactiva.
+    path('estaciones-trabajo/', EstacionTrabajoListCreateView.as_view(), name='estacion-trabajo-list-create'),
+    path('estaciones-trabajo/<int:id_estacion>/', EstacionTrabajoDetalleView.as_view(), name='estacion-trabajo-detalle'),
+    path('estaciones-trabajo/<int:id_estacion>/activar/', EstacionTrabajoActivarView.as_view(), name='estacion-trabajo-activar'),
+
+    # CU27: asignacion de barberos a estaciones.
+    # Incluye endpoints de apoyo para seleccionar barberos y estaciones disponibles.
+    # barberos-activos: llena el selector de barberos.
+    # estaciones-disponibles: llena el selector de estaciones libres para un turno.
+    # asignaciones-estaciones: registra y consulta las asignaciones creadas.
+    path('asignaciones-estaciones/barberos-activos/', BarberosActivosEstacionView.as_view(), name='asignacion-estacion-barberos-activos'),
+    path('asignaciones-estaciones/estaciones-disponibles/', EstacionesDisponiblesAsignacionView.as_view(), name='asignacion-estacion-estaciones-disponibles'),
+    path('asignaciones-estaciones/', AsignacionEstacionTrabajoListCreateView.as_view(), name='asignacion-estacion-list-create'),
+    path('asignaciones-estaciones/<int:id_asignacion>/', AsignacionEstacionTrabajoDetalleView.as_view(), name='asignacion-estacion-detalle'),
+    path('asignaciones-estaciones/<int:id_asignacion>/activar/', AsignacionEstacionTrabajoActivarView.as_view(), name='asignacion-estacion-activar'),
     path('disponibilidad/', DisponibilidadBarberoView.as_view(), name='cita-disponibilidad'),
 ]

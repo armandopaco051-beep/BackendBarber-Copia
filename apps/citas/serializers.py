@@ -8,6 +8,7 @@ from apps.seguridad.models import AsistenciaBarbero, BloqueoHorario, HorarioLabo
 from apps.servicios.models import Servicio
 
 from .models import (
+    AsignacionEstacionTrabajo,
     BarberoServicio,
     AtencionServicio,
     Cita,
@@ -15,6 +16,7 @@ from .models import (
     DetalleServicioCita,
     DetallePromocion,
     EstadoCita,
+    EstacionTrabajo,
     HistorialEstadoCita,
     Promocion,
 )
@@ -42,6 +44,8 @@ ESTADOS_CITA = [
 ]
 
 ESTADOS_NO_BLOQUEAN_HORARIO = ['CANCELADA', 'ANULADA', 'NO_ASISTIO']
+# Estados de asistencia que impiden asignar un barbero a una estacion ese dia.
+ESTADOS_ASISTENCIA_NO_DISPONIBLES = ['AUSENTE', 'PERMISO', 'INHABILITADO']
 
 
 # Convierte textos del frontend a formato uniforme de estados.
@@ -415,6 +419,173 @@ class AtencionFinalizarSerializer(serializers.Serializer):
 
 class AtencionCambiarEstadoSerializer(serializers.Serializer):
     observaciones = serializers.CharField(required=False, allow_blank=True)
+
+
+class EstacionTrabajoSerializer(serializers.ModelSerializer):
+    # Serializer del CU26: recibe datos del frontend y valida reglas de negocio.
+    estado = serializers.CharField(max_length=20, required=False)
+
+    class Meta:
+        model = EstacionTrabajo
+        fields = [
+            'id_estacion',
+            'nombre',
+            'descripcion',
+            'ubicacion_interna',
+            'estado',
+            'fecha_registro',
+            'fecha_actualizacion',
+        ]
+        read_only_fields = ['fecha_registro', 'fecha_actualizacion']
+
+    def validate_nombre(self, value):
+        # El nombre es obligatorio y no puede repetirse, ignorando mayusculas/minusculas.
+        nombre = value.strip()
+        if not nombre:
+            raise serializers.ValidationError("El nombre de la estacion es obligatorio.")
+
+        duplicada = EstacionTrabajo.objects.filter(nombre__iexact=nombre)
+        if self.instance:
+            duplicada = duplicada.exclude(pk=self.instance.pk)
+        if duplicada.exists():
+            raise serializers.ValidationError("Ya existe una estacion con ese nombre.")
+        return nombre
+
+    def validate_ubicacion_interna(self, value):
+        # La ubicacion interna indica en que parte fisica de la barberia esta la estacion.
+        ubicacion = value.strip()
+        if not ubicacion:
+            raise serializers.ValidationError("La ubicacion interna es obligatoria.")
+        return ubicacion
+
+    def validate_estado(self, value):
+        # Solo se aceptan los estados definidos por el modelo: ACTIVO o INACTIVO.
+        estado = value.upper()
+        if estado not in dict(EstacionTrabajo.ESTADOS):
+            raise serializers.ValidationError("Estado invalido.")
+        return estado
+
+
+class BarberoActivoSerializer(serializers.ModelSerializer):
+    # Serializer de apoyo para el paso 2 del CU27: mostrar barberos seleccionables.
+    # No crea ni actualiza usuarios; solo formatea la respuesta para el selector del frontend.
+    rol = serializers.CharField(source='id_rol.nombre', read_only=True)
+    nombre_completo = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = Usuario
+        fields = ['codigo', 'nombre', 'apellido', 'nombre_completo', 'telefono', 'correo', 'especialidad', 'rol']
+
+    @extend_schema_field(serializers.CharField())
+    def get_nombre_completo(self, obj):
+        return f"{obj.nombre} {obj.apellido}".strip()
+
+
+class AsignacionEstacionTrabajoSerializer(serializers.ModelSerializer):
+    # Serializer del CU27: valida barbero, estacion, horario y cruces de asignacion.
+    # El queryset limita la seleccion a usuarios con rol Barbero.
+    codigo_barbero = serializers.PrimaryKeyRelatedField(
+        queryset=Usuario.objects.select_related('id_rol').filter(id_rol__nombre__iexact='barbero')
+    )
+    id_estacion = serializers.PrimaryKeyRelatedField(queryset=EstacionTrabajo.objects.all())
+    barbero = serializers.SerializerMethodField(read_only=True)
+    estacion = serializers.CharField(source='id_estacion.nombre', read_only=True)
+    ubicacion_interna = serializers.CharField(source='id_estacion.ubicacion_interna', read_only=True)
+    registrado_por = serializers.PrimaryKeyRelatedField(read_only=True)
+    estado = serializers.CharField(max_length=20, required=False)
+
+    class Meta:
+        model = AsignacionEstacionTrabajo
+        fields = [
+            'id_asignacion',
+            'codigo_barbero',
+            'barbero',
+            'id_estacion',
+            'estacion',
+            'ubicacion_interna',
+            'fecha',
+            'hora_inicio',
+            'hora_fin',
+            'estado',
+            'observacion',
+            'registrado_por',
+            'fecha_registro',
+            'fecha_actualizacion',
+        ]
+        read_only_fields = ['registrado_por', 'fecha_registro', 'fecha_actualizacion']
+
+    @extend_schema_field(serializers.CharField())
+    def get_barbero(self, obj):
+        return f"{obj.codigo_barbero.nombre} {obj.codigo_barbero.apellido}".strip()
+
+    def validate_estado(self, value):
+        # Solo se aceptan estados operativos de la asignacion.
+        estado = value.upper()
+        if estado not in dict(AsignacionEstacionTrabajo.ESTADOS):
+            raise serializers.ValidationError("Estado invalido.")
+        return estado
+
+    def validate(self, data):
+        # Reglas centrales del flujo: barbero valido, estacion activa y sin cruces de turno.
+        instance = getattr(self, 'instance', None)
+        barbero = data.get('codigo_barbero', getattr(instance, 'codigo_barbero', None))
+        estacion = data.get('id_estacion', getattr(instance, 'id_estacion', None))
+        fecha = data.get('fecha', getattr(instance, 'fecha', None))
+        hora_inicio = data.get('hora_inicio', getattr(instance, 'hora_inicio', None))
+        hora_fin = data.get('hora_fin', getattr(instance, 'hora_fin', None))
+        estado = data.get('estado', getattr(instance, 'estado', 'ACTIVO'))
+
+        if not barbero or not barbero.es_barbero:
+            raise serializers.ValidationError({'codigo_barbero': 'El usuario seleccionado debe tener rol Barbero.'})
+        if not estacion:
+            raise serializers.ValidationError({'id_estacion': 'Debe seleccionar una estacion de trabajo.'})
+        # Una estacion INACTIVO no puede recibir nuevas asignaciones.
+        if estacion.estado != 'ACTIVO':
+            raise serializers.ValidationError({'id_estacion': 'La estacion no esta disponible.'})
+        # El rango horario representa el turno; sin un rango valido no se puede evaluar ocupacion.
+        if hora_inicio and hora_fin and hora_inicio >= hora_fin:
+            raise serializers.ValidationError({'hora_fin': 'La hora fin debe ser mayor a la hora inicio.'})
+
+        # Si existe una asistencia no disponible en la fecha, el barbero se considera inactivo para este caso de uso.
+        asistencia = AsistenciaBarbero.objects.filter(codigo_barbero=barbero, fecha=fecha).first()
+        estado_asistencia = str(getattr(asistencia, 'estado', '')).upper()
+        if asistencia and estado_asistencia in ESTADOS_ASISTENCIA_NO_DISPONIBLES:
+            raise serializers.ValidationError({'codigo_barbero': 'Barbero inactivo o no disponible para la fecha seleccionada.'})
+
+        if estado == 'ACTIVO':
+            # Cruce de intervalos: A cruza B cuando inicia antes de que B termine y termina despues de que B inicia.
+            # Esto evita que la misma estacion sea ocupada por dos barberos en el mismo turno.
+            asignaciones_estacion = AsignacionEstacionTrabajo.objects.filter(
+                id_estacion=estacion,
+                fecha=fecha,
+                estado='ACTIVO',
+                hora_inicio__lt=hora_fin,
+                hora_fin__gt=hora_inicio,
+            )
+            # Tambien evita que un mismo barbero tenga dos estaciones asignadas al mismo tiempo.
+            asignaciones_barbero = AsignacionEstacionTrabajo.objects.filter(
+                codigo_barbero=barbero,
+                fecha=fecha,
+                estado='ACTIVO',
+                hora_inicio__lt=hora_fin,
+                hora_fin__gt=hora_inicio,
+            )
+            if instance:
+                # Al actualizar, se excluye la asignacion actual para no detectarla como duplicada de si misma.
+                asignaciones_estacion = asignaciones_estacion.exclude(pk=instance.pk)
+                asignaciones_barbero = asignaciones_barbero.exclude(pk=instance.pk)
+            if asignaciones_estacion.exists():
+                raise serializers.ValidationError('Estacion ya asignada en el mismo horario.')
+            if asignaciones_barbero.exists():
+                raise serializers.ValidationError('El barbero ya tiene una estacion asignada en ese horario.')
+
+        return data
+
+    def create(self, validated_data):
+        # Guarda quien registro la asignacion desde el usuario autenticado.
+        request = self.context.get('request')
+        usuario_actual = getattr(request, 'usuario_actual', None) if request else None
+        return AsignacionEstacionTrabajo.objects.create(registrado_por=usuario_actual, **validated_data)
 
 
 # Serializer principal del CU11.

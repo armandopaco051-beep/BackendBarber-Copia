@@ -238,6 +238,126 @@ class DetalleAtencionServicio(models.Model):
         return f"Atencion {self.id_atencion_id} - {self.id_servicio.nombre}"
 
 
+# Modelo del CU26 Gestionar estaciones de trabajo.
+# Representa los espacios fisicos disponibles en la barberia para atender clientes.
+class EstacionTrabajo(models.Model):
+    # Estados permitidos para controlar si una estacion puede asignarse o no.
+    ESTADOS = (
+        ('ACTIVO', 'Activo'),
+        ('INACTIVO', 'Inactivo'),
+    )
+
+    id_estacion = models.AutoField(primary_key=True)
+    nombre = models.CharField(max_length=100)
+    descripcion = models.TextField(blank=True)
+    ubicacion_interna = models.CharField(max_length=150)
+    estado = models.CharField(max_length=20, choices=ESTADOS, default='ACTIVO')
+    fecha_registro = models.DateTimeField(auto_now_add=True)
+    fecha_actualizacion = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        # La tabla se guarda dentro del esquema agenda, como el resto del paquete citas.
+        db_table = '"agenda"."estacion_trabajo"'
+        verbose_name = 'Estacion de trabajo'
+        verbose_name_plural = 'Estaciones de trabajo'
+        ordering = ['nombre']
+
+    def __str__(self):
+        return self.nombre
+
+    @classmethod
+    def consultar(cls):
+        # Punto unico para obtener el queryset base de estaciones.
+        return cls.objects.all()
+
+    def guardar(self):
+        # Metodo de apoyo para mantener el mismo estilo usado por otros modelos del paquete.
+        self.save()
+        return self
+
+    def actualizar(self, **kwargs):
+        # Actualiza dinamicamente los campos enviados desde el caso de uso.
+        for attr, value in kwargs.items():
+            setattr(self, attr, value)
+        self.save()
+        return self
+
+    def cambiar_estado(self, estado):
+        # Permite activar o inactivar sin eliminar fisicamente la estacion.
+        self.estado = estado
+        self.save(update_fields=['estado', 'fecha_actualizacion'])
+        return self
+
+
+# Modelo del CU27 Asignar barbero a estacion.
+# Guarda que barbero usara una estacion en una fecha y horario especificos.
+class AsignacionEstacionTrabajo(models.Model):
+    # La asignacion puede desactivarse sin borrar el registro historico.
+    ESTADOS = (
+        ('ACTIVO', 'Activo'),
+        ('INACTIVO', 'Inactivo'),
+    )
+
+    id_asignacion = models.AutoField(primary_key=True)
+    codigo_barbero = models.ForeignKey(
+        # Barbero que atendera fisicamente en la estacion asignada.
+        Usuario,
+        on_delete=models.PROTECT,
+        db_column='codigo_barbero',
+        related_name='asignaciones_estacion'
+    )
+    id_estacion = models.ForeignKey(
+        # Estacion de trabajo definida en CU26.
+        EstacionTrabajo,
+        on_delete=models.PROTECT,
+        db_column='id_estacion',
+        related_name='asignaciones_barberos'
+    )
+    # La fecha y rango horario representan el "turno" donde aplica la asignacion.
+    # Estos campos permiten validar que una estacion no se ocupe dos veces al mismo tiempo.
+    fecha = models.DateField()
+    hora_inicio = models.TimeField()
+    hora_fin = models.TimeField()
+    estado = models.CharField(max_length=20, choices=ESTADOS, default='ACTIVO')
+    observacion = models.TextField(blank=True)
+    registrado_por = models.ForeignKey(
+        Usuario,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_column='registrado_por',
+        related_name='asignaciones_estacion_registradas'
+    )
+    fecha_registro = models.DateTimeField(auto_now_add=True)
+    fecha_actualizacion = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        # Tabla fisica del CU27 en el mismo esquema agenda usado por citas y estaciones.
+        db_table = '"agenda"."asignacion_estacion_trabajo"'
+        verbose_name = 'Asignacion de estacion de trabajo'
+        verbose_name_plural = 'Asignaciones de estaciones de trabajo'
+        ordering = ['-fecha', 'hora_inicio', 'codigo_barbero']
+
+    def __str__(self):
+        return f"{self.codigo_barbero.codigo} - {self.id_estacion.nombre} ({self.fecha})"
+
+    @classmethod
+    def consultar(cls):
+        # Incluye barbero, rol, estacion y usuario registrador para evitar consultas repetidas.
+        return cls.objects.select_related(
+            'codigo_barbero',
+            'codigo_barbero__id_rol',
+            'id_estacion',
+            'registrado_por',
+        )
+
+    def cambiar_estado(self, estado):
+        # Inactiva o reactiva la asignacion sin perder historial operativo.
+        self.estado = estado
+        self.save(update_fields=['estado', 'fecha_actualizacion'])
+        return self
+
+
 # Historial de cambios de estado de una cita.
 # Permite defender trazabilidad: Pendiente -> Confirmada -> Finalizada, etc.
 # Tabla fisica: agenda.historial_estado_cita.
