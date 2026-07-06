@@ -465,6 +465,80 @@ class PagoVenta(models.Model):
         return f"Pago {self.monto} - Venta {self.id_venta_id}"
 
 
+class VentaCuotas(models.Model):
+    # CU33: cabecera del plan de pagos asociado a una venta ya registrada.
+    ESTADOS = (
+        ('PENDIENTE', 'Pendiente'),
+        ('PAGADA', 'Pagada'),
+        ('ANULADA', 'Anulada'),
+    )
+
+    id_venta_cuotas = models.AutoField(primary_key=True)
+    id_venta = models.OneToOneField(
+        Venta,
+        on_delete=models.CASCADE,
+        db_column='id_venta',
+        related_name='venta_cuotas'
+    )
+    monto_inicial = models.DecimalField(max_digits=12, decimal_places=2)  # Importe cobrado al confirmar la venta.
+    saldo_pendiente = models.DecimalField(max_digits=12, decimal_places=2)  # Total restante que se divide en cuotas.
+    cantidad_cuotas = models.PositiveIntegerField()  # Numero de cuotas pendientes generadas por el sistema.
+    estado = models.CharField(max_length=20, choices=ESTADOS, default='PENDIENTE')
+    fecha_registro = models.DateTimeField(auto_now_add=True)
+    fecha_actualizacion = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'ventas_caja_venta_cuotas'
+        verbose_name = 'Venta por cuotas'
+        verbose_name_plural = 'Ventas por cuotas'
+        ordering = ['-fecha_registro']
+
+    def __str__(self):
+        return f"Venta cuotas #{self.id_venta_id} - {self.estado}"
+
+    @classmethod
+    def consultar(cls):
+        # Consulta optimizada para listar la venta, cliente, cajero y detalle de cuotas.
+        return cls.objects.select_related(
+            'id_venta',
+            'id_venta__codigo_cliente',
+            'id_venta__codigo_cajero',
+        ).prefetch_related('cuotas')
+
+
+class CuotaVenta(models.Model):
+    # CU33: cada registro representa una cuota individual con vencimiento y estado de pago.
+    ESTADOS = (
+        ('PENDIENTE', 'Pendiente'),
+        ('PAGADA', 'Pagada'),
+        ('VENCIDA', 'Vencida'),
+        ('ANULADA', 'Anulada'),
+    )
+
+    id_cuota = models.AutoField(primary_key=True)
+    id_venta_cuotas = models.ForeignKey(
+        VentaCuotas,
+        on_delete=models.CASCADE,
+        db_column='id_venta_cuotas',
+        related_name='cuotas'
+    )
+    numero_cuota = models.PositiveIntegerField()  # Orden de pago dentro del plan.
+    monto = models.DecimalField(max_digits=12, decimal_places=2)  # Monto a cobrar en esta cuota.
+    fecha_vencimiento = models.DateField()  # Fecha limite definida desde el primer vencimiento.
+    estado = models.CharField(max_length=20, choices=ESTADOS, default='PENDIENTE')
+    fecha_pago = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'ventas_caja_cuota_venta'
+        verbose_name = 'Cuota de venta'
+        verbose_name_plural = 'Cuotas de venta'
+        ordering = ['id_venta_cuotas', 'numero_cuota']
+        unique_together = ('id_venta_cuotas', 'numero_cuota')
+
+    def __str__(self):
+        return f"Cuota {self.numero_cuota} - Venta {self.id_venta_cuotas_id}"
+
+
 class PagoStripe(models.Model):
     ESTADOS = (
         ('CREADO', 'Creado'),

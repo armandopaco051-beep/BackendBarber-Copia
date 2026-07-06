@@ -1,7 +1,17 @@
 from rest_framework import serializers
 from drf_spectacular.utils import extend_schema_field
 
-from .models import CategoriaServicio, Servicio
+from apps.citas.models import AtencionServicio
+from apps.inventario.models import Producto
+
+from .models import (
+    CategoriaServicio,
+    DetallePaqueteServicio,
+    DetalleProductoRecomendacion,
+    PaqueteServicio,
+    RecomendacionCuidado,
+    Servicio,
+)
 
 
 # Serializer del CRUD de categorias.
@@ -131,3 +141,268 @@ class ServicioSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Ya existe un servicio con ese nombre en esta categoria.")
 
         return data
+
+
+class DetallePaqueteServicioSerializer(serializers.ModelSerializer):
+    # Representa un servicio incluido dentro de un paquete para respuestas de lectura.
+    servicio = serializers.CharField(source='id_servicio.nombre', read_only=True)
+    precio = serializers.DecimalField(source='id_servicio.precio', max_digits=10, decimal_places=2, read_only=True)
+    duracion_minutos = serializers.IntegerField(source='id_servicio.duracion_minutos', read_only=True)
+    estado_servicio = serializers.CharField(source='id_servicio.estado', read_only=True)
+
+    class Meta:
+        model = DetallePaqueteServicio
+        fields = ['id_detalle', 'id_paquete', 'id_servicio', 'servicio', 'precio', 'duracion_minutos', 'estado_servicio']
+
+
+class PaqueteServicioSerializer(serializers.ModelSerializer):
+    # Serializer del CU28: valida datos del paquete y servicios incluidos.
+    servicios = serializers.PrimaryKeyRelatedField(
+        queryset=Servicio.objects.filter(estado='ACTIVO'),
+        many=True,
+    )
+    servicios_detalle = serializers.SerializerMethodField(read_only=True)
+    estado = serializers.CharField(max_length=20, required=False)
+
+    class Meta:
+        model = PaqueteServicio
+        fields = [
+            'id_paquete',
+            'nombre',
+            'descripcion',
+            'precio_total',
+            'duracion_minutos',
+            'estado',
+            'servicios',
+            'servicios_detalle',
+            'fecha_registro',
+            'fecha_actualizacion',
+        ]
+        read_only_fields = ['fecha_registro', 'fecha_actualizacion']
+
+    @extend_schema_field(DetallePaqueteServicioSerializer(many=True))
+    def get_servicios_detalle(self, obj):
+        # Devuelve informacion legible de cada servicio incluido en el paquete.
+        detalles = obj.detalles_servicios.select_related('id_servicio').all()
+        return DetallePaqueteServicioSerializer(detalles, many=True).data
+
+    def validate_nombre(self, value):
+        # El nombre del paquete es obligatorio y unico.
+        nombre = value.strip()
+        if not nombre:
+            raise serializers.ValidationError("El nombre del paquete no puede estar vacio.")
+
+        duplicado = PaqueteServicio.objects.filter(nombre__iexact=nombre)
+        if self.instance:
+            duplicado = duplicado.exclude(pk=self.instance.pk)
+        if duplicado.exists():
+            raise serializers.ValidationError("Ya existe un paquete con ese nombre.")
+        return nombre
+
+    def validate_precio_total(self, value):
+        # Regla de negocio: el precio total debe ser positivo.
+        if value <= 0:
+            raise serializers.ValidationError("El precio total debe ser mayor a 0.")
+        return value
+
+    def validate_duracion_minutos(self, value):
+        # Regla de negocio: la duracion estimada debe ser positiva.
+        if value <= 0:
+            raise serializers.ValidationError("La duracion debe ser mayor a 0 minutos.")
+        return value
+
+    def validate_estado(self, value):
+        # Solo acepta ACTIVO o INACTIVO para publicar u ocultar el paquete.
+        estado = value.upper()
+        if estado not in dict(PaqueteServicio.ESTADOS):
+            raise serializers.ValidationError("Estado invalido.")
+        return estado
+
+    def validate_servicios(self, value):
+        # Debe existir al menos un servicio activo dentro del paquete.
+        if not value:
+            raise serializers.ValidationError("Debe seleccionar al menos un servicio activo.")
+        ids = [servicio.pk for servicio in value]
+        if len(ids) != len(set(ids)):
+            raise serializers.ValidationError("No puede repetir servicios dentro del paquete.")
+        servicios_inactivos = [servicio.nombre for servicio in value if servicio.estado != 'ACTIVO']
+        if servicios_inactivos:
+            raise serializers.ValidationError(f"Servicios inactivos no permitidos: {', '.join(servicios_inactivos)}.")
+        return value
+
+    def _actualizar_servicios(self, paquete, servicios):
+        # Reemplaza la composicion del paquete por los servicios seleccionados.
+        DetallePaqueteServicio.objects.filter(id_paquete=paquete).delete()
+        DetallePaqueteServicio.objects.bulk_create([
+            DetallePaqueteServicio(id_paquete=paquete, id_servicio=servicio)
+            for servicio in servicios
+        ])
+
+    def create(self, validated_data):
+        # CU28: primero crea el paquete y luego guarda los servicios que lo componen.
+        servicios = validated_data.pop('servicios', [])
+        paquete = PaqueteServicio.objects.create(**validated_data)
+        self._actualizar_servicios(paquete, servicios)
+        return paquete
+
+    def update(self, instance, validated_data):
+        # CU28: permite modificar datos generales y, si llegan servicios, reemplaza la lista incluida.
+        servicios = validated_data.pop('servicios', None)
+
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+
+        if servicios is not None:
+            self._actualizar_servicios(instance, servicios)
+
+        return instance
+
+
+class DetalleProductoRecomendacionSerializer(serializers.ModelSerializer):
+    # Representa los productos sugeridos dentro de una recomendacion.
+    producto = serializers.CharField(source='id_producto.nombre', read_only=True)
+    precio_venta = serializers.DecimalField(source='id_producto.precio_venta', max_digits=10, decimal_places=2, read_only=True)
+    estado_producto = serializers.CharField(source='id_producto.estado', read_only=True)
+
+    class Meta:
+        model = DetalleProductoRecomendacion
+        fields = ['id_detalle', 'id_recomendacion', 'id_producto', 'producto', 'precio_venta', 'estado_producto']
+
+
+class RecomendacionCuidadoSerializer(serializers.ModelSerializer):
+    # Serializer del CU29: registra recomendaciones posteriores a una atencion finalizada.
+    id_atencion = serializers.PrimaryKeyRelatedField(
+        queryset=AtencionServicio.objects.select_related('codigo_cliente', 'codigo_barbero', 'id_cita').all()
+    )
+    productos_sugeridos = serializers.PrimaryKeyRelatedField(
+        queryset=Producto.objects.filter(estado='ACTIVO'),
+        many=True,
+        required=False,
+    )
+    productos_detalle = serializers.SerializerMethodField(read_only=True)
+    cliente = serializers.SerializerMethodField(read_only=True)
+    barbero = serializers.SerializerMethodField(read_only=True)
+    servicio_principal = serializers.CharField(source='id_atencion.id_cita.id_servicio.nombre', read_only=True)
+    fecha_atencion = serializers.DateField(source='id_atencion.fecha', read_only=True)
+    codigo_cliente = serializers.PrimaryKeyRelatedField(read_only=True)
+    codigo_barbero = serializers.PrimaryKeyRelatedField(read_only=True)
+    estado = serializers.CharField(max_length=20, required=False)
+
+    class Meta:
+        model = RecomendacionCuidado
+        fields = [
+            'id_recomendacion',
+            'id_atencion',
+            'codigo_cliente',
+            'cliente',
+            'codigo_barbero',
+            'barbero',
+            'servicio_principal',
+            'fecha_atencion',
+            'contenido',
+            'frecuencia_corte',
+            'cuidados_cabello',
+            'productos_sugeridos',
+            'productos_detalle',
+            'estado',
+            'fecha_registro',
+            'fecha_actualizacion',
+        ]
+        read_only_fields = ['codigo_cliente', 'codigo_barbero', 'fecha_registro', 'fecha_actualizacion']
+
+    @extend_schema_field(serializers.CharField())
+    def get_cliente(self, obj):
+        return f"{obj.codigo_cliente.nombre} {obj.codigo_cliente.apellido}".strip()
+
+    @extend_schema_field(serializers.CharField())
+    def get_barbero(self, obj):
+        return f"{obj.codigo_barbero.nombre} {obj.codigo_barbero.apellido}".strip()
+
+    @extend_schema_field(DetalleProductoRecomendacionSerializer(many=True))
+    def get_productos_detalle(self, obj):
+        detalles = obj.detalles_productos.select_related('id_producto').all()
+        return DetalleProductoRecomendacionSerializer(detalles, many=True).data
+
+    def validate_contenido(self, value):
+        # La recomendacion principal no puede estar vacia.
+        contenido = value.strip()
+        if not contenido:
+            raise serializers.ValidationError("La recomendacion de cuidado es obligatoria.")
+        return contenido
+
+    def validate_estado(self, value):
+        # CU29: controla si la recomendacion queda visible o inactiva para consultas posteriores.
+        estado = value.upper()
+        if estado not in dict(RecomendacionCuidado.ESTADOS):
+            raise serializers.ValidationError("Estado invalido.")
+        return estado
+
+    def validate_productos_sugeridos(self, value):
+        # Los productos son opcionales, pero si se envian deben estar activos y sin repetirse.
+        ids = [producto.pk for producto in value]
+        if len(ids) != len(set(ids)):
+            raise serializers.ValidationError("No puede repetir productos sugeridos.")
+        productos_inactivos = [producto.nombre for producto in value if producto.estado != 'ACTIVO']
+        if productos_inactivos:
+            raise serializers.ValidationError(f"Productos inactivos no permitidos: {', '.join(productos_inactivos)}.")
+        return value
+
+    def validate(self, data):
+        # La recomendacion solo puede registrarse sobre una atencion finalizada.
+        instance = getattr(self, 'instance', None)
+        atencion = data.get('id_atencion', getattr(instance, 'id_atencion', None))
+        request = self.context.get('request')
+        usuario_actual = getattr(request, 'usuario_actual', None) if request else None
+
+        if not atencion:
+            raise serializers.ValidationError({'id_atencion': 'Debe seleccionar una atencion finalizada.'})
+        if atencion.estado != 'FINALIZADA':
+            raise serializers.ValidationError({'id_atencion': 'La atencion no esta finalizada.'})
+        if not atencion.codigo_cliente_id:
+            raise serializers.ValidationError({'codigo_cliente': 'Cliente inexistente.'})
+
+        if usuario_actual:
+            # CU29: solo administradores o el barbero asignado a la atencion pueden registrar recomendaciones.
+            if usuario_actual.es_cliente:
+                raise serializers.ValidationError('El cliente no tiene permiso para registrar recomendaciones.')
+            if usuario_actual.es_barbero and atencion.codigo_barbero_id != usuario_actual.codigo:
+                raise serializers.ValidationError('El barbero solo puede recomendar sobre sus propias atenciones.')
+
+        return data
+
+    def _actualizar_productos(self, recomendacion, productos):
+        # Reemplaza los productos sugeridos de la recomendacion.
+        DetalleProductoRecomendacion.objects.filter(id_recomendacion=recomendacion).delete()
+        DetalleProductoRecomendacion.objects.bulk_create([
+            DetalleProductoRecomendacion(id_recomendacion=recomendacion, id_producto=producto)
+            for producto in productos
+        ])
+
+    def create(self, validated_data):
+        # CU29: toma cliente y barbero desde la atencion finalizada para evitar asociaciones manuales incorrectas.
+        productos = validated_data.pop('productos_sugeridos', [])
+        atencion = validated_data['id_atencion']
+        recomendacion = RecomendacionCuidado.objects.create(
+            codigo_cliente=atencion.codigo_cliente,
+            codigo_barbero=atencion.codigo_barbero,
+            **validated_data
+        )
+        self._actualizar_productos(recomendacion, productos)
+        return recomendacion
+
+    def update(self, instance, validated_data):
+        # CU29: actualiza la recomendacion y sincroniza productos sugeridos cuando se envian.
+        productos = validated_data.pop('productos_sugeridos', None)
+        atencion = validated_data.get('id_atencion', instance.id_atencion)
+
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.codigo_cliente = atencion.codigo_cliente
+        instance.codigo_barbero = atencion.codigo_barbero
+        instance.save()
+
+        if productos is not None:
+            self._actualizar_productos(instance, productos)
+
+        return instance

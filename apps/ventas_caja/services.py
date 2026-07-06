@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 import time
+from datetime import timedelta
 
 import requests
 from django.conf import settings
@@ -26,6 +27,8 @@ from .models import (
     PagoVenta,
     PlanComision,
     Venta,
+    VentaCuotas,
+    CuotaVenta,
 )
 
 
@@ -103,6 +106,56 @@ def _crear_movimiento_caja(
         referencia=referencia,
         usuario=usuario,
     )
+
+
+def _registrar_salida_productos(venta, usuario):
+    for detalle in venta.detalles.select_related('id_producto'):
+        if detalle.tipo_item != 'PRODUCTO':
+            continue
+
+        producto = Producto.objects.select_for_update().get(pk=detalle.id_producto_id)
+        if producto.cantidad_disponible < detalle.cantidad:
+            raise ValidationError({'stock': f'Stock insuficiente para {producto.nombre}.'})
+
+        stock_anterior = producto.cantidad_disponible
+        producto.cantidad_disponible = stock_anterior - detalle.cantidad
+        producto.save(update_fields=['cantidad_disponible', 'fecha_actualizacion'])
+
+        MovimientoInventario.objects.create(
+            id_producto=producto,
+            tipo_movimiento='SALIDA_VENTA',
+            cantidad=detalle.cantidad,
+            stock_anterior=stock_anterior,
+            stock_nuevo=producto.cantidad_disponible,
+            motivo=f'Venta #{venta.id_venta}',
+            id_venta=venta,
+            usuario=usuario,
+        )
+
+
+def _registrar_comisiones_venta(venta):
+    venta.comisiones.all().delete()
+    for detalle in venta.detalles.select_related('codigo_barbero'):
+        if detalle.tipo_item != 'SERVICIO' or not detalle.codigo_barbero_id:
+            continue
+
+        plan = PlanComision.objects.filter(
+            codigo_barbero=detalle.codigo_barbero,
+            estado='ACTIVO',
+            fecha_inicio__lte=timezone.localdate(),
+        ).order_by('-fecha_inicio').first()
+        if not plan:
+            continue
+
+        porcentaje = plan.porcentaje_barbero
+        monto = (detalle.subtotal * porcentaje) / Decimal('100')
+        ComisionVenta.objects.create(
+            id_venta=venta,
+            id_detalle=detalle,
+            codigo_barbero=detalle.codigo_barbero,
+            porcentaje=porcentaje,
+            monto=monto,
+        )
 
 
 @transaction.atomic
@@ -339,6 +392,124 @@ def crear_venta_borrador(data, usuario):
         raise ValidationError({'descuento': 'El descuento de la venta no puede superar el subtotal.'})
 
     return venta
+
+
+def _generar_cuotas(venta_cuotas, saldo, cantidad_cuotas, fecha_primer_vencimiento, dias_entre_cuotas):
+    # CU33: divide el saldo pendiente en cuotas y ajusta la ultima para evitar diferencias por redondeo.
+    monto_base = (saldo / Decimal(cantidad_cuotas)).quantize(Decimal('0.01'))
+    cuotas = []
+    acumulado = Decimal('0.00')
+
+    for numero in range(1, cantidad_cuotas + 1):
+        if numero == cantidad_cuotas:
+            monto = saldo - acumulado
+        else:
+            monto = monto_base
+            acumulado += monto
+
+        cuotas.append(CuotaVenta(
+            id_venta_cuotas=venta_cuotas,
+            numero_cuota=numero,
+            monto=monto,
+            fecha_vencimiento=fecha_primer_vencimiento + timedelta(days=dias_entre_cuotas * (numero - 1)),
+            estado='PENDIENTE',
+        ))
+
+    CuotaVenta.objects.bulk_create(cuotas)
+
+
+@transaction.atomic
+def registrar_venta_por_cuotas(data, usuario):
+    # CU33: orquesta todo el registro de una venta financiada dentro de una transaccion.
+    if not usuario:
+        raise ValidationError('No se pudo identificar al usuario actual.')
+
+    # Precondicion: debe existir una caja abierta para registrar el monto inicial recibido.
+    caja = _validar_caja_abierta()
+
+    # Precondicion: el pago inicial necesita un metodo de pago activo y su referencia si aplica.
+    metodo = MetodoPago.objects.filter(pk=data['id_metodo_pago_inicial'], estado='ACTIVO').first()
+    if not metodo:
+        raise ValidationError({'id_metodo_pago_inicial': 'Metodo de pago no encontrado o inactivo.'})
+
+    referencia = (data.get('referencia_inicial') or '').strip()
+    if metodo.requiere_referencia and not referencia:
+        raise ValidationError({'referencia_inicial': f'El metodo {metodo.nombre} requiere referencia.'})
+
+    # Crea la venta base usando el mismo flujo de detalle de productos/servicios de ventas normales.
+    venta_data = {
+        'codigo_cliente': data.get('codigo_cliente'),
+        'id_cita': data.get('id_cita'),
+        'descuento': data.get('descuento') or Decimal('0.00'),
+        'observacion': data.get('observacion') or 'Venta por cuotas',
+        'detalles': data.get('detalles') or [],
+    }
+    venta = crear_venta_borrador(venta_data, usuario)
+    venta = Venta.objects.select_for_update().prefetch_related('detalles').get(pk=venta.pk)
+    venta.recalcular_totales()
+
+    # Valida reglas propias de cuotas: cliente obligatorio, total valido e inicial menor al total.
+    if not venta.codigo_cliente_id:
+        raise ValidationError({'codigo_cliente': 'Debe existir un cliente asociado a la venta.'})
+    if venta.total <= 0:
+        raise ValidationError({'total': 'El total de la venta debe ser mayor a 0.'})
+
+    monto_inicial = data['monto_inicial']
+    if monto_inicial >= venta.total:
+        raise ValidationError({'monto_inicial': 'El monto inicial debe ser menor al total de la venta.'})
+
+    cantidad_cuotas = data['cantidad_cuotas']
+    if cantidad_cuotas <= 0:
+        raise ValidationError({'cantidad_cuotas': 'La cantidad de cuotas debe ser mayor a 0.'})
+
+    saldo_pendiente = venta.total - monto_inicial
+
+    # Registra el pago inicial y el movimiento de caja correspondiente.
+    pago = PagoVenta.objects.create(
+        id_venta=venta,
+        id_metodo_pago=metodo,
+        monto=monto_inicial,
+        referencia=referencia,
+    )
+    _crear_movimiento_caja(
+        caja=caja,
+        usuario=usuario,
+        tipo_movimiento='VENTA',
+        monto=monto_inicial,
+        descripcion=f'Pago inicial venta por cuotas #{venta.id_venta}',
+        metodo_pago=metodo,
+        referencia=referencia or f'CUOTAS-{venta.id_venta}',
+        venta=venta,
+        pago_venta=pago,
+    )
+
+    # Aplica efectos de la venta confirmada: salida de inventario y comisiones.
+    _registrar_salida_productos(venta, usuario)
+    _registrar_comisiones_venta(venta)
+
+    # La venta queda pendiente de pago porque aun existen cuotas por cobrar.
+    venta.estado = 'PENDIENTE_PAGO'
+    venta.save(update_fields=['estado', 'fecha_actualizacion'])
+
+    # Crea el plan de cuotas y su detalle de vencimientos.
+    venta_cuotas = VentaCuotas.objects.create(
+        id_venta=venta,
+        monto_inicial=monto_inicial,
+        saldo_pendiente=saldo_pendiente,
+        cantidad_cuotas=cantidad_cuotas,
+        estado='PENDIENTE',
+    )
+    _generar_cuotas(
+        venta_cuotas=venta_cuotas,
+        saldo=saldo_pendiente,
+        cantidad_cuotas=cantidad_cuotas,
+        fecha_primer_vencimiento=data['fecha_primer_vencimiento'],
+        dias_entre_cuotas=data.get('dias_entre_cuotas') or 30,
+    )
+
+    # Actualiza el saldo esperado de caja con el monto inicial registrado.
+    caja.recalcular_saldo_esperado()
+    return VentaCuotas.consultar().get(pk=venta_cuotas.pk)
 
 
 @transaction.atomic

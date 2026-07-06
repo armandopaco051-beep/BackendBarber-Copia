@@ -11,7 +11,7 @@ from apps.seguridad.permissions import EsAdmin, TienePermiso
 from apps.seguridad.views import registrar_bitacora
 
 from .comprobantes import comprobante_venta_pdf
-from .models import Caja, MetodoPago, MovimientoCaja, PlanComision, Venta
+from .models import Caja, MetodoPago, MovimientoCaja, PlanComision, Venta, VentaCuotas
 from .serializers import (
     CajaAperturaSerializer,
     CajaCierreSerializer,
@@ -25,6 +25,8 @@ from .serializers import (
     VentaAnularSerializer,
     VentaConfirmarSerializer,
     VentaCrearSerializer,
+    VentaCuotasCrearSerializer,
+    VentaCuotasSerializer,
     VentaSerializer,
 )
 from .services import (
@@ -35,6 +37,7 @@ from .services import (
     crear_venta_borrador,
     procesar_webhook_stripe,
     registrar_movimiento_caja_manual,
+    registrar_venta_por_cuotas,
     resumen_caja_abierta,
 )
 
@@ -741,6 +744,105 @@ class VentaListCreateView(APIView):
             },
             status=status.HTTP_201_CREATED
         )
+
+
+@extend_schema(tags=["CU33 - Gestionar Venta por Cuotas"])
+class VentaCuotasListCreateView(APIView):
+    permission_classes = [TienePermiso]
+    permisos_por_metodo = {
+        'GET': 'ventas.ver',
+        'POST': 'ventas.crear',
+    }
+    serializer_class = VentaCuotasSerializer
+
+    @extend_schema(
+        summary="Listar ventas por cuotas",
+        responses={200: VentaCuotasSerializer(many=True)}
+    )
+    def get(self, request):
+        # CU33: lista planes de cuotas y permite filtrar por estado, cliente o venta base.
+        ventas_cuotas = VentaCuotas.consultar()
+        estado_filtro = request.query_params.get('estado')
+        codigo_cliente = request.query_params.get('codigo_cliente')
+        id_venta = request.query_params.get('id_venta')
+
+        if estado_filtro:
+            ventas_cuotas = ventas_cuotas.filter(estado=estado_filtro.upper())
+        if codigo_cliente:
+            ventas_cuotas = ventas_cuotas.filter(id_venta__codigo_cliente_id=codigo_cliente)
+        if id_venta:
+            ventas_cuotas = ventas_cuotas.filter(id_venta_id=id_venta)
+
+        registrar_bitacora(request, 'CONSULTAR_VENTAS_CUOTAS', 'Consulta de ventas por cuotas.')
+        return Response(VentaCuotasSerializer(ventas_cuotas, many=True).data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        summary="Registrar venta por cuotas",
+        request=VentaCuotasCrearSerializer,
+        responses={
+            201: VentaCuotasSerializer,
+            400: OpenApiResponse(description="Datos invalidos."),
+            403: OpenApiResponse(description="Usuario sin permisos para registrar venta por cuotas."),
+        },
+        examples=[
+            OpenApiExample(
+                "Registrar venta por cuotas",
+                value={
+                    "codigo_cliente": "CLI001",
+                    "descuento": "0.00",
+                    "observacion": "Venta por cuotas",
+                    "detalles": [
+                        {"tipo_item": "PRODUCTO", "id_producto": 1, "cantidad": 1, "descuento": "0.00"}
+                    ],
+                    "monto_inicial": "50.00",
+                    "cantidad_cuotas": 3,
+                    "id_metodo_pago_inicial": 1,
+                    "referencia_inicial": "",
+                    "fecha_primer_vencimiento": "2026-08-05",
+                    "dias_entre_cuotas": 30
+                },
+                request_only=True,
+            )
+        ]
+    )
+    def post(self, request):
+        # CU33: valida la solicitud y delega al servicio que registra venta, caja y cuotas.
+        serializer = VentaCuotasCrearSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        usuario = getattr(request, 'usuario_actual', None)
+        try:
+            venta_cuotas = registrar_venta_por_cuotas(serializer.validated_data, usuario)
+            registrar_bitacora(request, 'CREAR_VENTA_CUOTAS', f'Venta por cuotas registrada: {venta_cuotas.id_venta_id}.')
+        except ValidationError as exc:
+            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {
+                'mensaje': 'Venta por cuotas registrada correctamente.',
+                'venta_cuotas': VentaCuotasSerializer(venta_cuotas).data,
+            },
+            status=status.HTTP_201_CREATED
+        )
+
+
+@extend_schema(tags=["CU33 - Gestionar Venta por Cuotas"])
+class VentaCuotasDetalleView(APIView):
+    permission_classes = [TienePermiso]
+    permiso_requerido = 'ventas.ver'
+    serializer_class = VentaCuotasSerializer
+
+    @extend_schema(
+        summary="Ver detalle de venta por cuotas",
+        responses={200: VentaCuotasSerializer, 404: OpenApiResponse(description="No encontrada.")}
+    )
+    def get(self, request, id_venta_cuotas):
+        # CU33: muestra el plan completo de una venta por cuotas especifica.
+        venta_cuotas = VentaCuotas.consultar().filter(pk=id_venta_cuotas).first()
+        if not venta_cuotas:
+            return Response({'error': 'Venta por cuotas no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(VentaCuotasSerializer(venta_cuotas).data, status=status.HTTP_200_OK)
 
 
 @extend_schema(tags=["CU19 - Gestionar Ventas"])

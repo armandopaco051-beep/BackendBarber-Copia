@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 
 from django.core.exceptions import ValidationError
-from django.utils.dateparse import parse_date
+from django.utils.dateparse import parse_date, parse_time
 from drf_spectacular.utils import extend_schema, OpenApiExample, OpenApiParameter, OpenApiResponse
 from rest_framework import status
 from rest_framework.response import Response
@@ -12,18 +12,21 @@ from apps.seguridad.permissions import EsAdmin, EsAdminOBarbero
 from apps.seguridad.views import registrar_bitacora
 from apps.servicios.models import Servicio
 
-from .models import AtencionServicio, BarberoServicio, Cita, EstadoCita, Promocion
+from .models import AsignacionEstacionTrabajo, AtencionServicio, BarberoServicio, Cita, EstadoCita, EstacionTrabajo, Promocion
 from .serializers import (
+    AsignacionEstacionTrabajoSerializer,
     AtencionAgregarServiciosSerializer,
     AtencionCambiarEstadoSerializer,
     AtencionFinalizarSerializer,
     AtencionIniciarSerializer,
     AtencionServicioSerializer,
     BarberoServicioSerializer,
+    BarberoActivoSerializer,
     CitaSerializer,
     DIAS_SEMANA,
     ESTADOS_NO_BLOQUEAN_HORARIO,
     EstadoCitaSerializer,
+    EstacionTrabajoSerializer,
     HistorialEstadoCitaSerializer,
     PromocionSerializer,
 )
@@ -66,6 +69,11 @@ def parsear_fecha_frontend(valor):
         return datetime.strptime(valor or '', '%d/%m/%Y').date()
     except ValueError:
         return None
+
+
+def parsear_hora_frontend(valor):
+    # Acepta HH:MM o HH:MM:SS para filtros de disponibilidad.
+    return parse_time(str(valor or ''))
 
 
 def cruza_intervalo(inicio_a, fin_a, inicio_b, fin_b):
@@ -875,6 +883,417 @@ class PromocionDetalleView(APIView):
         promocion.cambiar_estado('INACTIVO')
         registrar_bitacora(request, 'DESACTIVAR_PROMOCION', f'Promocion desactivada: {promocion.id_promocion}.')
         return Response({'mensaje': 'Promocion desactivada correctamente.'}, status=status.HTTP_200_OK)
+
+
+@extend_schema(tags=["CU26 - Gestionar Estaciones de Trabajo"])
+class EstacionTrabajoListCreateView(APIView):
+    # Solo el administrador puede registrar y consultar estaciones de trabajo.
+    permission_classes = [EsAdmin]
+
+    @extend_schema(
+        summary="Listar estaciones de trabajo",
+        description="Lista estaciones. Permite filtrar por estado, nombre y ubicacion interna.",
+        responses={200: EstacionTrabajoSerializer(many=True)}
+    )
+    def get(self, request):
+        # Lista estaciones registradas y permite filtrar la vista del frontend.
+        estaciones = EstacionTrabajo.consultar()
+        estado_filtro = request.query_params.get('estado')
+        nombre = request.query_params.get('nombre')
+        ubicacion_interna = request.query_params.get('ubicacion_interna')
+
+        if estado_filtro:
+            estaciones = estaciones.filter(estado=estado_filtro.upper())
+        if nombre:
+            estaciones = estaciones.filter(nombre__icontains=nombre)
+        if ubicacion_interna:
+            estaciones = estaciones.filter(ubicacion_interna__icontains=ubicacion_interna)
+
+        registrar_bitacora(request, 'CONSULTAR_ESTACIONES_TRABAJO', 'Consulta de estaciones de trabajo.')
+        return Response(EstacionTrabajoSerializer(estaciones, many=True).data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        summary="Registrar estacion de trabajo",
+        request=EstacionTrabajoSerializer,
+        responses={
+            201: OpenApiResponse(description="Estacion registrada."),
+            400: OpenApiResponse(description="Datos invalidos o estacion duplicada."),
+        },
+        examples=[
+            OpenApiExample(
+                "Registrar estacion",
+                value={
+                    "nombre": "Estacion 1",
+                    "descripcion": "Silla principal con espejo y herramientas basicas",
+                    "ubicacion_interna": "Sala principal - lado izquierdo",
+                    "estado": "ACTIVO",
+                },
+                request_only=True,
+            )
+        ]
+    )
+    def post(self, request):
+        # Registra una nueva estacion si pasa las validaciones del serializer.
+        serializer = EstacionTrabajoSerializer(data=request.data)
+        if serializer.is_valid():
+            estacion = serializer.save()
+            registrar_bitacora(request, 'CREAR_ESTACION_TRABAJO', f'Estacion creada: {estacion.id_estacion}.')
+            return Response(
+                {
+                    'mensaje': 'Estacion de trabajo registrada correctamente.',
+                    'estacion': EstacionTrabajoSerializer(estacion).data,
+                },
+                status=status.HTTP_201_CREATED
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@extend_schema(tags=["CU26 - Gestionar Estaciones de Trabajo"])
+class EstacionTrabajoDetalleView(APIView):
+    # Maneja operaciones sobre una estacion especifica: ver, modificar o inactivar.
+    permission_classes = [EsAdmin]
+
+    def _get_estacion(self, id_estacion):
+        # Busca la estacion por su llave primaria y devuelve None si no existe.
+        try:
+            return EstacionTrabajo.consultar().get(pk=id_estacion)
+        except EstacionTrabajo.DoesNotExist:
+            return None
+
+    @extend_schema(
+        summary="Ver detalle de estacion de trabajo",
+        responses={200: EstacionTrabajoSerializer, 404: OpenApiResponse(description="No encontrada.")}
+    )
+    def get(self, request, id_estacion):
+        # Devuelve el detalle de una estacion para cargarlo en formularios o vistas.
+        estacion = self._get_estacion(id_estacion)
+        if not estacion:
+            return Response({'error': 'Estacion de trabajo no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        registrar_bitacora(request, 'CONSULTAR_ESTACIONES_TRABAJO', f'Consulta de estacion {id_estacion}.')
+        return Response(EstacionTrabajoSerializer(estacion).data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        summary="Actualizar estacion de trabajo",
+        request=EstacionTrabajoSerializer,
+        responses={
+            200: OpenApiResponse(description="Estacion actualizada."),
+            400: OpenApiResponse(description="Datos invalidos o estacion duplicada."),
+            404: OpenApiResponse(description="No encontrada."),
+        }
+    )
+    def put(self, request, id_estacion):
+        # Actualiza parcialmente la estacion; solo valida los campos enviados.
+        estacion = self._get_estacion(id_estacion)
+        if not estacion:
+            return Response({'error': 'Estacion de trabajo no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        serializer = EstacionTrabajoSerializer(estacion, data=request.data, partial=True)
+        if serializer.is_valid():
+            estacion = serializer.save()
+            registrar_bitacora(request, 'ACTUALIZAR_ESTACION_TRABAJO', f'Estacion actualizada: {estacion.id_estacion}.')
+            return Response(
+                {
+                    'mensaje': 'Estacion de trabajo actualizada correctamente.',
+                    'estacion': EstacionTrabajoSerializer(estacion).data,
+                },
+                status=status.HTTP_200_OK
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @extend_schema(
+        summary="Inactivar estacion de trabajo",
+        description="No elimina la estacion; la deja como INACTIVO.",
+        responses={
+            200: OpenApiResponse(description="Estacion inactivada."),
+            404: OpenApiResponse(description="No encontrada."),
+        }
+    )
+    def delete(self, request, id_estacion):
+        # Inactivacion logica: conserva el registro para auditoria y evita borrado fisico.
+        estacion = self._get_estacion(id_estacion)
+        if not estacion:
+            return Response({'error': 'Estacion de trabajo no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        estacion.cambiar_estado('INACTIVO')
+        registrar_bitacora(request, 'INACTIVAR_ESTACION_TRABAJO', f'Estacion inactivada: {estacion.id_estacion}.')
+        return Response({'mensaje': 'Estacion de trabajo inactivada correctamente.'}, status=status.HTTP_200_OK)
+
+
+@extend_schema(tags=["CU26 - Gestionar Estaciones de Trabajo"])
+class EstacionTrabajoActivarView(APIView):
+    # Endpoint separado para reactivar estaciones previamente inactivadas.
+    permission_classes = [EsAdmin]
+
+    @extend_schema(
+        summary="Activar estacion de trabajo",
+        responses={
+            200: OpenApiResponse(description="Estacion activada."),
+            404: OpenApiResponse(description="No encontrada."),
+        }
+    )
+    def post(self, request, id_estacion):
+        # Cambia el estado a ACTIVO y devuelve la estacion actualizada.
+        estacion = EstacionTrabajo.objects.filter(pk=id_estacion).first()
+        if not estacion:
+            return Response({'error': 'Estacion de trabajo no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        estacion.cambiar_estado('ACTIVO')
+        registrar_bitacora(request, 'ACTIVAR_ESTACION_TRABAJO', f'Estacion activada: {estacion.id_estacion}.')
+        return Response(
+            {
+                'mensaje': 'Estacion de trabajo activada correctamente.',
+                'estacion': EstacionTrabajoSerializer(estacion).data,
+            },
+            status=status.HTTP_200_OK
+        )
+
+
+@extend_schema(tags=["CU27 - Asignar Barbero a Estacion"])
+class BarberosActivosEstacionView(APIView):
+    # Endpoint de apoyo para el paso 2 del flujo: mostrar barberos activos/seleccionables.
+    permission_classes = [EsAdmin]
+
+    @extend_schema(
+        summary="Listar barberos activos para asignacion",
+        description="Si se envia fecha, excluye barberos con asistencia AUSENTE, PERMISO o INHABILITADO.",
+        parameters=[OpenApiParameter(name='fecha', required=False, type=str)],
+        responses={200: BarberoActivoSerializer(many=True)}
+    )
+    def get(self, request):
+        # Base: todos los usuarios cuyo rol es Barbero.
+        barberos = Usuario.objects.select_related('id_rol').filter(
+            id_rol__nombre__iexact='barbero'
+        ).order_by('nombre', 'apellido', 'codigo')
+
+        # Si el frontend envia fecha, se quitan los barberos no disponibles por asistencia.
+        fecha = parsear_fecha_frontend(request.query_params.get('fecha'))
+        if fecha:
+            barberos_no_disponibles = AsistenciaBarbero.objects.filter(
+                fecha=fecha,
+                estado__in=ESTADOS_ASISTENCIA_NO_DISPONIBLES,
+            ).values_list('codigo_barbero_id', flat=True)
+            barberos = barberos.exclude(codigo__in=barberos_no_disponibles)
+
+        registrar_bitacora(request, 'CONSULTAR_BARBEROS_ASIGNACION_ESTACION', 'Consulta de barberos para asignacion de estacion.')
+        return Response(BarberoActivoSerializer(barberos, many=True).data, status=status.HTTP_200_OK)
+
+
+@extend_schema(tags=["CU27 - Asignar Barbero a Estacion"])
+class EstacionesDisponiblesAsignacionView(APIView):
+    # Endpoint de apoyo para el paso 4 del flujo: mostrar estaciones disponibles.
+    permission_classes = [EsAdmin]
+
+    @extend_schema(
+        summary="Listar estaciones disponibles para asignacion",
+        description="Con fecha, hora_inicio y hora_fin excluye estaciones ya ocupadas en ese rango.",
+        parameters=[
+            OpenApiParameter(name='fecha', required=False, type=str),
+            OpenApiParameter(name='hora_inicio', required=False, type=str),
+            OpenApiParameter(name='hora_fin', required=False, type=str),
+        ],
+        responses={200: EstacionTrabajoSerializer(many=True), 400: OpenApiResponse(description="Horario invalido.")}
+    )
+    def get(self, request):
+        # Solo las estaciones ACTIVAS pueden aparecer como disponibles.
+        estaciones = EstacionTrabajo.objects.filter(estado='ACTIVO')
+
+        fecha = parsear_fecha_frontend(request.query_params.get('fecha'))
+        hora_inicio = parsear_hora_frontend(request.query_params.get('hora_inicio'))
+        hora_fin = parsear_hora_frontend(request.query_params.get('hora_fin'))
+
+        # Si se consulta disponibilidad por turno, los tres datos son obligatorios.
+        if any([request.query_params.get('fecha'), request.query_params.get('hora_inicio'), request.query_params.get('hora_fin')]):
+            if not fecha or not hora_inicio or not hora_fin:
+                return Response({'error': 'Debe enviar fecha, hora_inicio y hora_fin validos.'}, status=status.HTTP_400_BAD_REQUEST)
+            if hora_inicio >= hora_fin:
+                return Response({'error': 'La hora fin debe ser mayor a la hora inicio.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Busca estaciones ya ocupadas en un rango que cruza con el turno solicitado.
+            estaciones_ocupadas = AsignacionEstacionTrabajo.objects.filter(
+                fecha=fecha,
+                estado='ACTIVO',
+                hora_inicio__lt=hora_fin,
+                hora_fin__gt=hora_inicio,
+            ).values_list('id_estacion_id', flat=True)
+            # La respuesta final excluye esas estaciones ocupadas.
+            estaciones = estaciones.exclude(id_estacion__in=estaciones_ocupadas)
+
+        registrar_bitacora(request, 'CONSULTAR_ESTACIONES_DISPONIBLES', 'Consulta de estaciones disponibles para asignacion.')
+        return Response(EstacionTrabajoSerializer(estaciones, many=True).data, status=status.HTTP_200_OK)
+
+
+@extend_schema(tags=["CU27 - Asignar Barbero a Estacion"])
+class AsignacionEstacionTrabajoListCreateView(APIView):
+    # CRUD principal de asignaciones: GET lista y POST registra una nueva asignacion.
+    permission_classes = [EsAdmin]
+
+    @extend_schema(
+        summary="Listar asignaciones de estaciones",
+        description="Permite filtrar por fecha, barbero, estacion y estado.",
+        parameters=[
+            OpenApiParameter(name='fecha', required=False, type=str),
+            OpenApiParameter(name='codigo_barbero', required=False, type=str),
+            OpenApiParameter(name='id_estacion', required=False, type=int),
+            OpenApiParameter(name='estado', required=False, type=str),
+        ],
+        responses={200: AsignacionEstacionTrabajoSerializer(many=True)}
+    )
+    def get(self, request):
+        # Lista las asignaciones registradas, con filtros para pantallas de consulta.
+        asignaciones = AsignacionEstacionTrabajo.consultar().all()
+        fecha = request.query_params.get('fecha')
+        codigo_barbero = request.query_params.get('codigo_barbero')
+        id_estacion = request.query_params.get('id_estacion')
+        estado_filtro = request.query_params.get('estado')
+
+        if fecha:
+            asignaciones = asignaciones.filter(fecha=fecha)
+        if codigo_barbero:
+            asignaciones = asignaciones.filter(codigo_barbero_id=codigo_barbero)
+        if id_estacion:
+            asignaciones = asignaciones.filter(id_estacion_id=id_estacion)
+        if estado_filtro:
+            asignaciones = asignaciones.filter(estado=estado_filtro.upper())
+
+        registrar_bitacora(request, 'CONSULTAR_ASIGNACIONES_ESTACION', 'Consulta de asignaciones de estacion.')
+        return Response(AsignacionEstacionTrabajoSerializer(asignaciones, many=True).data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        summary="Asignar barbero a estacion",
+        request=AsignacionEstacionTrabajoSerializer,
+        responses={
+            201: OpenApiResponse(description="Asignacion registrada."),
+            400: OpenApiResponse(description="Datos invalidos, barbero no disponible o estacion ocupada."),
+        },
+        examples=[
+            OpenApiExample(
+                "Asignar estacion",
+                value={
+                    "codigo_barbero": "BARB001",
+                    "id_estacion": 1,
+                    "fecha": "2026-07-05",
+                    "hora_inicio": "09:00:00",
+                    "hora_fin": "13:00:00",
+                    "estado": "ACTIVO",
+                    "observacion": "Turno de la manana",
+                },
+                request_only=True,
+            )
+        ]
+    )
+    def post(self, request):
+        # Registra la asignacion usando el serializer, donde viven las reglas de negocio.
+        serializer = AsignacionEstacionTrabajoSerializer(data=request.data, context={'request': request})
+        if serializer.is_valid():
+            asignacion = serializer.save()
+            registrar_bitacora(request, 'CREAR_ASIGNACION_ESTACION', f'Asignacion creada: {asignacion.id_asignacion}.')
+            return Response(
+                {
+                    'mensaje': 'Barbero asignado a estacion correctamente.',
+                    'asignacion': AsignacionEstacionTrabajoSerializer(asignacion).data,
+                },
+                status=status.HTTP_201_CREATED
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@extend_schema(tags=["CU27 - Asignar Barbero a Estacion"])
+class AsignacionEstacionTrabajoDetalleView(APIView):
+    # Operaciones sobre una asignacion concreta: ver, modificar o inactivar.
+    permission_classes = [EsAdmin]
+
+    def _get_asignacion(self, id_asignacion):
+        # Busca con relaciones cargadas para responder el detalle completo.
+        try:
+            return AsignacionEstacionTrabajo.consultar().get(pk=id_asignacion)
+        except AsignacionEstacionTrabajo.DoesNotExist:
+            return None
+
+    @extend_schema(
+        summary="Ver detalle de asignacion de estacion",
+        responses={200: AsignacionEstacionTrabajoSerializer, 404: OpenApiResponse(description="No encontrada.")}
+    )
+    def get(self, request, id_asignacion):
+        # Devuelve el detalle para que el frontend muestre o edite la asignacion.
+        asignacion = self._get_asignacion(id_asignacion)
+        if not asignacion:
+            return Response({'error': 'Asignacion de estacion no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(AsignacionEstacionTrabajoSerializer(asignacion).data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        summary="Actualizar asignacion de estacion",
+        request=AsignacionEstacionTrabajoSerializer,
+        responses={
+            200: OpenApiResponse(description="Asignacion actualizada."),
+            400: OpenApiResponse(description="Datos invalidos o estacion ocupada."),
+            404: OpenApiResponse(description="No encontrada."),
+        }
+    )
+    def put(self, request, id_asignacion):
+        # Actualiza parcialmente; si cambia horario, barbero, estacion o estado, se revalidan los cruces.
+        asignacion = self._get_asignacion(id_asignacion)
+        if not asignacion:
+            return Response({'error': 'Asignacion de estacion no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        serializer = AsignacionEstacionTrabajoSerializer(asignacion, data=request.data, partial=True, context={'request': request})
+        if serializer.is_valid():
+            asignacion = serializer.save()
+            registrar_bitacora(request, 'ACTUALIZAR_ASIGNACION_ESTACION', f'Asignacion actualizada: {asignacion.id_asignacion}.')
+            return Response(
+                {
+                    'mensaje': 'Asignacion de estacion actualizada correctamente.',
+                    'asignacion': AsignacionEstacionTrabajoSerializer(asignacion).data,
+                },
+                status=status.HTTP_200_OK
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @extend_schema(
+        summary="Inactivar asignacion de estacion",
+        description="No elimina la asignacion; la deja como INACTIVO.",
+        responses={200: OpenApiResponse(description="Asignacion inactivada."), 404: OpenApiResponse(description="No encontrada.")}
+    )
+    def delete(self, request, id_asignacion):
+        # Inactivacion logica: la asignacion deja de ocupar la estacion, pero queda registrada.
+        asignacion = self._get_asignacion(id_asignacion)
+        if not asignacion:
+            return Response({'error': 'Asignacion de estacion no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        asignacion.cambiar_estado('INACTIVO')
+        registrar_bitacora(request, 'INACTIVAR_ASIGNACION_ESTACION', f'Asignacion inactivada: {asignacion.id_asignacion}.')
+        return Response({'mensaje': 'Asignacion de estacion inactivada correctamente.'}, status=status.HTTP_200_OK)
+
+
+@extend_schema(tags=["CU27 - Asignar Barbero a Estacion"])
+class AsignacionEstacionTrabajoActivarView(APIView):
+    # Reactiva una asignacion validando nuevamente que no choque con otra asignacion activa.
+    permission_classes = [EsAdmin]
+
+    @extend_schema(
+        summary="Activar asignacion de estacion",
+        responses={
+            200: OpenApiResponse(description="Asignacion activada."),
+            400: OpenApiResponse(description="No se puede activar por reglas de negocio."),
+            404: OpenApiResponse(description="No encontrada."),
+        }
+    )
+    def post(self, request, id_asignacion):
+        # Antes de activar, se pasa por el serializer para verificar que el turno siga libre.
+        asignacion = AsignacionEstacionTrabajo.consultar().filter(pk=id_asignacion).first()
+        if not asignacion:
+            return Response({'error': 'Asignacion de estacion no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        serializer = AsignacionEstacionTrabajoSerializer(
+            asignacion,
+            data={'estado': 'ACTIVO'},
+            partial=True,
+            context={'request': request},
+        )
+        if serializer.is_valid():
+            asignacion = serializer.save()
+            registrar_bitacora(request, 'ACTIVAR_ASIGNACION_ESTACION', f'Asignacion activada: {asignacion.id_asignacion}.')
+            return Response(
+                {
+                    'mensaje': 'Asignacion de estacion activada correctamente.',
+                    'asignacion': AsignacionEstacionTrabajoSerializer(asignacion).data,
+                },
+                status=status.HTTP_200_OK
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 # Endpoint de apoyo para frontend.

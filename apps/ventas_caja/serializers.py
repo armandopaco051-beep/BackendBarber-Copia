@@ -7,12 +7,14 @@ from .models import (
     Caja,
     ComisionVenta,
     DetalleVenta,
+    CuotaVenta,
     MetodoPago,
     MovimientoCaja,
     PagoStripe,
     PagoVenta,
     PlanComision,
     Venta,
+    VentaCuotas,
 )
 
 
@@ -537,3 +539,61 @@ class VentaAnularSerializer(serializers.Serializer):
         if not motivo:
             raise serializers.ValidationError("El motivo de anulacion es obligatorio.")
         return motivo
+
+
+class CuotaVentaSerializer(serializers.ModelSerializer):
+    # CU33: expone cada cuota generada para consultar monto, vencimiento y estado.
+    class Meta:
+        model = CuotaVenta
+        fields = [
+            'id_cuota',
+            'numero_cuota',
+            'monto',
+            'fecha_vencimiento',
+            'estado',
+            'fecha_pago',
+        ]
+
+
+class VentaCuotasSerializer(serializers.ModelSerializer):
+    # CU33: respuesta completa de la venta por cuotas con venta base y cuotas pendientes.
+    venta = VentaSerializer(source='id_venta', read_only=True)
+    cuotas = CuotaVentaSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = VentaCuotas
+        fields = [
+            'id_venta_cuotas',
+            'id_venta',
+            'venta',
+            'monto_inicial',
+            'saldo_pendiente',
+            'cantidad_cuotas',
+            'estado',
+            'fecha_registro',
+            'fecha_actualizacion',
+            'cuotas',
+        ]
+
+
+class VentaCuotasCrearSerializer(VentaCrearSerializer):
+    # CU33: datos adicionales que convierten una venta normal en venta financiada por cuotas.
+    monto_inicial = serializers.DecimalField(max_digits=12, decimal_places=2)
+    cantidad_cuotas = serializers.IntegerField(min_value=1)
+    id_metodo_pago_inicial = serializers.IntegerField()
+    referencia_inicial = serializers.CharField(required=False, allow_blank=True)
+    fecha_primer_vencimiento = serializers.DateField()
+    dias_entre_cuotas = serializers.IntegerField(min_value=1, default=30)
+
+    def validate_monto_inicial(self, value):
+        # CU33: el pago inicial debe existir y luego se compara contra el total calculado.
+        if value <= 0:
+            raise serializers.ValidationError("El monto inicial debe ser mayor a 0.")
+        return value
+
+    def validate(self, data):
+        # CU33: reutiliza validaciones de venta y exige cliente directo o derivado de cita.
+        data = super().validate(data)
+        if not data.get('codigo_cliente') and not data.get('id_cita'):
+            raise serializers.ValidationError({'codigo_cliente': 'Debe asociar un cliente a la venta por cuotas.'})
+        return data
