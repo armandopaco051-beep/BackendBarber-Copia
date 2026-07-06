@@ -3,8 +3,11 @@ from django.urls import path
 from .views import (
     ClienteCitaDetalleView,
     ClienteCitaListCreateView,
+    ClienteBeneficioFidelizacionView,
     ClienteDashboardView,
     ClienteDisponibilidadView,
+    ClienteRecomendacionListView,
+    ClienteResponderEncuestaView,
     EncuestaSatisfaccionActivarView,
     EncuestaSatisfaccionDetalleView,
     EncuestaSatisfaccionListCreateView,
@@ -20,6 +23,9 @@ urlpatterns = [
     path('disponibilidad/', ClienteDisponibilidadView.as_view(), name='cliente-disponibilidad'),
     path('citas/', ClienteCitaListCreateView.as_view(), name='cliente-cita-list-create'),
     path('citas/<int:id_cita>/', ClienteCitaDetalleView.as_view(), name='cliente-cita-detalle'),
+    path('recomendaciones/', ClienteRecomendacionListView.as_view(), name='cliente-recomendacion-list'),
+    path('beneficios-fidelizacion/', ClienteBeneficioFidelizacionView.as_view(), name='cliente-beneficio-fidelizacion'),
+    path('encuestas/responder/', ClienteResponderEncuestaView.as_view(), name='cliente-responder-encuesta'),
 
     # CU30: gestion administrativa de encuestas de satisfaccion.
     path('encuestas/', EncuestaSatisfaccionListCreateView.as_view(), name='encuesta-satisfaccion-list-create'),

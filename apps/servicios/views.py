@@ -1,13 +1,22 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
+from rest_framework.parsers import FormParser, MultiPartParser
 from drf_spectacular.utils import extend_schema, OpenApiExample, OpenApiResponse
 
 from apps.seguridad.permissions import EsAdmin, EsAdminOLecturaAutenticada, EsCualquierUsuario
 from apps.seguridad.views import registrar_bitacora
 
-from .models import CategoriaServicio, PaqueteServicio, RecomendacionCuidado, Servicio
-from .serializers import CategoriaServicioSerializer, PaqueteServicioSerializer, RecomendacionCuidadoSerializer, ServicioSerializer
+from .models import CategoriaServicio, DiagnosticoCapilar, PaqueteServicio, RecomendacionCuidado, Servicio, TrabajoPortafolio
+from .serializers import (
+    CategoriaServicioSerializer,
+    DiagnosticoCapilarSerializer,
+    PaqueteServicioSerializer,
+    RecomendacionCuidadoSerializer,
+    RevisionTrabajoPortafolioSerializer,
+    ServicioSerializer,
+    TrabajoPortafolioSerializer,
+)
 
 
 # CRUD de CU6 Gestionar categorias.
@@ -593,3 +602,312 @@ class RecomendacionCuidadoActivarView(APIView):
             },
             status=status.HTTP_200_OK
         )
+
+
+# Caso de uso: Registrar diagnostico capilar del cliente.
+# Barberos registran diagnosticos y el historial queda consultable segun el rol autenticado.
+@extend_schema(tags=["Registrar Diagnostico Capilar"])
+class DiagnosticoCapilarListCreateView(APIView):
+    permission_classes = [EsCualquierUsuario]
+
+    def _filtrar_por_usuario(self, queryset, request):
+        usuario = getattr(request, 'usuario_actual', None)
+        if not usuario:
+            return queryset.none()
+        if usuario.es_admin:
+            return queryset
+        if usuario.es_barbero:
+            return queryset.filter(codigo_barbero=usuario)
+        if usuario.es_cliente:
+            return queryset.filter(codigo_cliente=usuario, estado='ACTIVO')
+        return queryset.none()
+
+    @extend_schema(
+        summary="Listar diagnosticos capilares",
+        description="Muestra diagnosticos del historial del cliente segun el rol autenticado.",
+        responses={200: DiagnosticoCapilarSerializer(many=True)}
+    )
+    def get(self, request):
+        diagnosticos = self._filtrar_por_usuario(DiagnosticoCapilar.consultar(), request)
+        codigo_cliente = request.query_params.get('codigo_cliente')
+        codigo_barbero = request.query_params.get('codigo_barbero')
+        id_cita = request.query_params.get('id_cita')
+        id_atencion = request.query_params.get('id_atencion')
+
+        if codigo_cliente:
+            diagnosticos = diagnosticos.filter(codigo_cliente_id=codigo_cliente)
+        if codigo_barbero:
+            diagnosticos = diagnosticos.filter(codigo_barbero_id=codigo_barbero)
+        if id_cita:
+            diagnosticos = diagnosticos.filter(id_cita_id=id_cita)
+        if id_atencion:
+            diagnosticos = diagnosticos.filter(id_atencion_id=id_atencion)
+
+        registrar_bitacora(request, 'CONSULTAR_DIAGNOSTICOS_CAPILARES', 'Consulta de diagnosticos capilares.')
+        return Response(DiagnosticoCapilarSerializer(diagnosticos, many=True).data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        summary="Registrar diagnostico capilar",
+        request=DiagnosticoCapilarSerializer,
+        responses={
+            201: OpenApiResponse(description="Diagnostico registrado."),
+            400: OpenApiResponse(description="Datos invalidos."),
+            403: OpenApiResponse(description="Usuario sin rol de barbero."),
+        },
+        examples=[
+            OpenApiExample(
+                "Registrar diagnostico capilar",
+                value={
+                    "codigo_cliente": "CLI001",
+                    "id_cita": 1,
+                    "tipo_cabello": "Ondulado",
+                    "condicion_cuero_cabelludo": "Sensible",
+                    "observaciones": "Presenta resequedad en puntas.",
+                    "necesidades_detectadas": "Hidratacion y corte de mantenimiento.",
+                    "cuidados_sugeridos": "Usar shampoo suave y evitar calor directo.",
+                },
+                request_only=True,
+            )
+        ]
+    )
+    def post(self, request):
+        usuario = getattr(request, 'usuario_actual', None)
+        if not usuario or not usuario.es_barbero:
+            return Response({'error': 'Usuario sin rol de barbero.'}, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = DiagnosticoCapilarSerializer(data=request.data, context={'request': request})
+        if serializer.is_valid():
+            diagnostico = serializer.save()
+            registrar_bitacora(request, 'CREAR_DIAGNOSTICO_CAPILAR', f'Diagnostico capilar registrado: {diagnostico.id_diagnostico}.')
+            return Response(
+                {
+                    'mensaje': 'Diagnostico capilar registrado correctamente.',
+                    'diagnostico': DiagnosticoCapilarSerializer(diagnostico).data,
+                },
+                status=status.HTTP_201_CREATED
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@extend_schema(tags=["Registrar Diagnostico Capilar"])
+class DiagnosticoCapilarDetalleView(APIView):
+    permission_classes = [EsCualquierUsuario]
+
+    def _get_diagnostico(self, request, id_diagnostico):
+        usuario = getattr(request, 'usuario_actual', None)
+        queryset = DiagnosticoCapilar.consultar()
+        if not usuario:
+            return None
+        if usuario.es_barbero:
+            queryset = queryset.filter(codigo_barbero=usuario)
+        elif usuario.es_cliente:
+            queryset = queryset.filter(codigo_cliente=usuario, estado='ACTIVO')
+        elif not usuario.es_admin:
+            return None
+        return queryset.filter(pk=id_diagnostico).first()
+
+    @extend_schema(
+        summary="Ver detalle de diagnostico capilar",
+        responses={200: DiagnosticoCapilarSerializer, 404: OpenApiResponse(description="No encontrado.")}
+    )
+    def get(self, request, id_diagnostico):
+        diagnostico = self._get_diagnostico(request, id_diagnostico)
+        if not diagnostico:
+            return Response({'error': 'Diagnostico capilar no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(DiagnosticoCapilarSerializer(diagnostico).data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        summary="Actualizar diagnostico capilar",
+        request=DiagnosticoCapilarSerializer,
+        responses={
+            200: OpenApiResponse(description="Diagnostico actualizado."),
+            400: OpenApiResponse(description="Datos invalidos."),
+            403: OpenApiResponse(description="Usuario sin rol de barbero."),
+            404: OpenApiResponse(description="No encontrado."),
+        }
+    )
+    def put(self, request, id_diagnostico):
+        usuario = getattr(request, 'usuario_actual', None)
+        if not usuario or not usuario.es_barbero:
+            return Response({'error': 'Usuario sin rol de barbero.'}, status=status.HTTP_403_FORBIDDEN)
+
+        diagnostico = self._get_diagnostico(request, id_diagnostico)
+        if not diagnostico:
+            return Response({'error': 'Diagnostico capilar no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = DiagnosticoCapilarSerializer(diagnostico, data=request.data, partial=True, context={'request': request})
+        if serializer.is_valid():
+            diagnostico = serializer.save()
+            registrar_bitacora(request, 'ACTUALIZAR_DIAGNOSTICO_CAPILAR', f'Diagnostico capilar actualizado: {diagnostico.id_diagnostico}.')
+            return Response(
+                {
+                    'mensaje': 'Diagnostico capilar actualizado correctamente.',
+                    'diagnostico': DiagnosticoCapilarSerializer(diagnostico).data,
+                },
+                status=status.HTTP_200_OK
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @extend_schema(
+        summary="Inactivar diagnostico capilar",
+        responses={200: OpenApiResponse(description="Diagnostico inactivado."), 404: OpenApiResponse(description="No encontrado.")}
+    )
+    def delete(self, request, id_diagnostico):
+        usuario = getattr(request, 'usuario_actual', None)
+        if not usuario or not usuario.es_barbero:
+            return Response({'error': 'Usuario sin rol de barbero.'}, status=status.HTTP_403_FORBIDDEN)
+
+        diagnostico = self._get_diagnostico(request, id_diagnostico)
+        if not diagnostico:
+            return Response({'error': 'Diagnostico capilar no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+        diagnostico.cambiar_estado('INACTIVO')
+        registrar_bitacora(request, 'INACTIVAR_DIAGNOSTICO_CAPILAR', f'Diagnostico capilar inactivado: {diagnostico.id_diagnostico}.')
+        return Response({'mensaje': 'Diagnostico capilar inactivado correctamente.'}, status=status.HTTP_200_OK)
+
+
+# Caso de uso: Gestionar portafolio de trabajos realizados.
+@extend_schema(tags=["Gestionar Portafolio de Trabajos"])
+class TrabajoPortafolioListCreateView(APIView):
+    permission_classes = [EsCualquierUsuario]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def _filtrar_por_usuario(self, queryset, request):
+        usuario = getattr(request, 'usuario_actual', None)
+        if not usuario:
+            return queryset.none()
+        if usuario.es_admin:
+            return queryset
+        if usuario.es_barbero:
+            return queryset.filter(codigo_barbero=usuario)
+        if usuario.es_cliente:
+            return queryset.filter(estado='APROBADO')
+        return queryset.none()
+
+    @extend_schema(
+        summary="Listar trabajos de portafolio",
+        responses={200: TrabajoPortafolioSerializer(many=True)}
+    )
+    def get(self, request):
+        trabajos = self._filtrar_por_usuario(TrabajoPortafolio.consultar(), request)
+        estado_filtro = request.query_params.get('estado')
+        id_servicio = request.query_params.get('id_servicio')
+        codigo_barbero = request.query_params.get('codigo_barbero')
+        estilo = request.query_params.get('estilo')
+
+        if estado_filtro:
+            trabajos = trabajos.filter(estado=estado_filtro.upper())
+        if id_servicio:
+            trabajos = trabajos.filter(id_servicio_id=id_servicio)
+        if codigo_barbero:
+            trabajos = trabajos.filter(codigo_barbero_id=codigo_barbero)
+        if estilo:
+            trabajos = trabajos.filter(estilo__icontains=estilo)
+
+        registrar_bitacora(request, 'CONSULTAR_TRABAJOS_PORTAFOLIO', 'Consulta de trabajos de portafolio.')
+        return Response(TrabajoPortafolioSerializer(trabajos, many=True).data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        summary="Registrar trabajo de portafolio",
+        request=TrabajoPortafolioSerializer,
+        responses={
+            201: OpenApiResponse(description="Trabajo registrado como pendiente."),
+            400: OpenApiResponse(description="Datos invalidos."),
+            403: OpenApiResponse(description="Usuario sin permisos."),
+        },
+        examples=[
+            OpenApiExample(
+                "Registrar trabajo",
+                value={
+                    "id_servicio": 1,
+                    "id_atencion": 1,
+                    "descripcion": "Corte fade con acabado natural.",
+                    "estilo": "Fade bajo",
+                    "imagen": "archivo-imagen",
+                    "referencia": "Cliente solicito acabado clasico.",
+                },
+                request_only=True,
+            )
+        ]
+    )
+    def post(self, request):
+        usuario = getattr(request, 'usuario_actual', None)
+        if not usuario or not usuario.es_barbero:
+            return Response({'error': 'Solo barberos pueden registrar trabajos de portafolio.'}, status=status.HTTP_403_FORBIDDEN)
+        serializer = TrabajoPortafolioSerializer(data=request.data, context={'request': request})
+        if serializer.is_valid():
+            trabajo = serializer.save()
+            registrar_bitacora(request, 'CREAR_TRABAJO_PORTAFOLIO', f'Trabajo de portafolio registrado: {trabajo.id_trabajo}.')
+            return Response(
+                {'mensaje': 'Trabajo registrado como pendiente de revision.', 'trabajo': TrabajoPortafolioSerializer(trabajo).data},
+                status=status.HTTP_201_CREATED
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@extend_schema(tags=["Gestionar Portafolio de Trabajos"])
+class TrabajoPortafolioDetalleView(APIView):
+    permission_classes = [EsCualquierUsuario]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def _get_trabajo(self, request, id_trabajo):
+        usuario = getattr(request, 'usuario_actual', None)
+        queryset = TrabajoPortafolio.consultar()
+        if not usuario:
+            return None
+        if usuario.es_barbero:
+            queryset = queryset.filter(codigo_barbero=usuario)
+        elif usuario.es_cliente:
+            queryset = queryset.filter(estado='APROBADO')
+        elif not usuario.es_admin:
+            return None
+        return queryset.filter(pk=id_trabajo).first()
+
+    @extend_schema(
+        summary="Ver detalle de trabajo de portafolio",
+        responses={200: TrabajoPortafolioSerializer, 404: OpenApiResponse(description="No encontrado.")}
+    )
+    def get(self, request, id_trabajo):
+        trabajo = self._get_trabajo(request, id_trabajo)
+        if not trabajo:
+            return Response({'error': 'Trabajo de portafolio no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(TrabajoPortafolioSerializer(trabajo).data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        summary="Actualizar trabajo de portafolio",
+        request=TrabajoPortafolioSerializer,
+        responses={200: OpenApiResponse(description="Trabajo actualizado."), 400: OpenApiResponse(description="Datos invalidos.")}
+    )
+    def put(self, request, id_trabajo):
+        usuario = getattr(request, 'usuario_actual', None)
+        if not usuario or not usuario.es_barbero:
+            return Response({'error': 'Solo barberos pueden modificar trabajos.'}, status=status.HTTP_403_FORBIDDEN)
+        trabajo = self._get_trabajo(request, id_trabajo)
+        if not trabajo:
+            return Response({'error': 'Trabajo de portafolio no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+        serializer = TrabajoPortafolioSerializer(trabajo, data=request.data, partial=True, context={'request': request})
+        if serializer.is_valid():
+            trabajo = serializer.save()
+            registrar_bitacora(request, 'ACTUALIZAR_TRABAJO_PORTAFOLIO', f'Trabajo de portafolio actualizado: {trabajo.id_trabajo}.')
+            return Response({'mensaje': 'Trabajo actualizado correctamente.', 'trabajo': TrabajoPortafolioSerializer(trabajo).data})
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@extend_schema(tags=["Gestionar Portafolio de Trabajos"])
+class TrabajoPortafolioRevisionView(APIView):
+    permission_classes = [EsAdmin]
+
+    @extend_schema(
+        summary="Revisar trabajo de portafolio",
+        request=RevisionTrabajoPortafolioSerializer,
+        responses={200: OpenApiResponse(description="Trabajo revisado."), 404: OpenApiResponse(description="No encontrado.")}
+    )
+    def post(self, request, id_trabajo):
+        trabajo = TrabajoPortafolio.consultar().filter(pk=id_trabajo).first()
+        if not trabajo:
+            return Response({'error': 'Trabajo de portafolio no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+        serializer = RevisionTrabajoPortafolioSerializer(trabajo, data=request.data, context={'request': request})
+        if serializer.is_valid():
+            trabajo = serializer.save()
+            registrar_bitacora(request, 'REVISAR_TRABAJO_PORTAFOLIO', f'Trabajo revisado: {trabajo.id_trabajo}.')
+            return Response({'mensaje': 'Trabajo revisado correctamente.', 'trabajo': TrabajoPortafolioSerializer(trabajo).data})
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

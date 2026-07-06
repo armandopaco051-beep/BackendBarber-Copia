@@ -3,6 +3,8 @@ from django.urls import path
 from .views import (
     CategoriaServicioDetalleView,
     CategoriaServicioListCreateView,
+    DiagnosticoCapilarDetalleView,
+    DiagnosticoCapilarListCreateView,
     PaqueteServicioActivarView,
     PaqueteServicioDetalleView,
     PaqueteServicioListCreateView,
@@ -11,6 +13,9 @@ from .views import (
     RecomendacionCuidadoListCreateView,
     ServicioDetalleView,
     ServicioListCreateView,
+    TrabajoPortafolioDetalleView,
+    TrabajoPortafolioListCreateView,
+    TrabajoPortafolioRevisionView,
 )
 
 
@@ -35,4 +40,13 @@ urlpatterns = [
     path('recomendaciones/', RecomendacionCuidadoListCreateView.as_view(), name='recomendacion-cuidado-list-create'),
     path('recomendaciones/<int:id_recomendacion>/', RecomendacionCuidadoDetalleView.as_view(), name='recomendacion-cuidado-detalle'),
     path('recomendaciones/<int:id_recomendacion>/activar/', RecomendacionCuidadoActivarView.as_view(), name='recomendacion-cuidado-activar'),
+
+    # Registrar diagnostico capilar del cliente.
+    path('diagnosticos-capilares/', DiagnosticoCapilarListCreateView.as_view(), name='diagnostico-capilar-list-create'),
+    path('diagnosticos-capilares/<int:id_diagnostico>/', DiagnosticoCapilarDetalleView.as_view(), name='diagnostico-capilar-detalle'),
+
+    # Gestionar portafolio de trabajos realizados.
+    path('portafolio-trabajos/', TrabajoPortafolioListCreateView.as_view(), name='trabajo-portafolio-list-create'),
+    path('portafolio-trabajos/<int:id_trabajo>/', TrabajoPortafolioDetalleView.as_view(), name='trabajo-portafolio-detalle'),
+    path('portafolio-trabajos/<int:id_trabajo>/revisar/', TrabajoPortafolioRevisionView.as_view(), name='trabajo-portafolio-revisar'),
 ]

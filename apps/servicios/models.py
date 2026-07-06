@@ -230,3 +230,154 @@ class DetalleProductoRecomendacion(models.Model):
 
     def __str__(self):
         return f"{self.id_recomendacion_id} - {self.id_producto.nombre}"
+
+
+# Caso de uso: Registrar diagnostico capilar del cliente.
+# Guarda informacion tecnica del cabello para futuras atenciones personalizadas.
+class DiagnosticoCapilar(models.Model):
+    ESTADOS = (
+        ('ACTIVO', 'Activo'),
+        ('INACTIVO', 'Inactivo'),
+    )
+
+    id_diagnostico = models.AutoField(primary_key=True)
+    codigo_cliente = models.ForeignKey(
+        'seguridad.Usuario',
+        on_delete=models.PROTECT,
+        db_column='codigo_cliente',
+        related_name='diagnosticos_capilares_recibidos'
+    )
+    codigo_barbero = models.ForeignKey(
+        'seguridad.Usuario',
+        on_delete=models.PROTECT,
+        db_column='codigo_barbero',
+        related_name='diagnosticos_capilares_realizados'
+    )
+    id_cita = models.ForeignKey(
+        'citas.Cita',
+        on_delete=models.PROTECT,
+        db_column='id_cita',
+        related_name='diagnosticos_capilares',
+        null=True,
+        blank=True,
+    )
+    id_atencion = models.ForeignKey(
+        'citas.AtencionServicio',
+        on_delete=models.PROTECT,
+        db_column='id_atencion',
+        related_name='diagnosticos_capilares',
+        null=True,
+        blank=True,
+    )
+    tipo_cabello = models.CharField(max_length=120)
+    condicion_cuero_cabelludo = models.CharField(max_length=180)
+    observaciones = models.TextField(blank=True)
+    necesidades_detectadas = models.TextField()
+    cuidados_sugeridos = models.TextField(blank=True)
+    estado = models.CharField(max_length=20, choices=ESTADOS, default='ACTIVO')
+    fecha_registro = models.DateTimeField(auto_now_add=True)
+    fecha_actualizacion = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = '"agenda"."diagnostico_capilar"'
+        verbose_name = 'Diagnostico capilar'
+        verbose_name_plural = 'Diagnosticos capilares'
+        ordering = ['-fecha_registro']
+
+    def __str__(self):
+        return f"Diagnostico {self.id_diagnostico} - {self.codigo_cliente.codigo}"
+
+    @classmethod
+    def consultar(cls):
+        return cls.objects.select_related(
+            'codigo_cliente',
+            'codigo_barbero',
+            'id_cita',
+            'id_cita__id_servicio',
+            'id_atencion',
+            'id_atencion__id_cita',
+        )
+
+    def cambiar_estado(self, estado):
+        self.estado = estado
+        self.save(update_fields=['estado', 'fecha_actualizacion'])
+        return self
+
+
+# Caso de uso: Gestionar portafolio de trabajos realizados.
+# Registra trabajos de barberos y permite publicarlos cuando el administrador los aprueba.
+class TrabajoPortafolio(models.Model):
+    ESTADOS = (
+        ('PENDIENTE', 'Pendiente de revision'),
+        ('APROBADO', 'Aprobado'),
+        ('RECHAZADO', 'Rechazado'),
+        ('INACTIVO', 'Inactivo'),
+    )
+
+    id_trabajo = models.AutoField(primary_key=True)
+    codigo_barbero = models.ForeignKey(
+        'seguridad.Usuario',
+        on_delete=models.PROTECT,
+        db_column='codigo_barbero',
+        related_name='trabajos_portafolio'
+    )
+    id_servicio = models.ForeignKey(
+        Servicio,
+        on_delete=models.PROTECT,
+        db_column='id_servicio',
+        related_name='trabajos_portafolio'
+    )
+    id_atencion = models.ForeignKey(
+        'citas.AtencionServicio',
+        on_delete=models.SET_NULL,
+        db_column='id_atencion',
+        related_name='trabajos_portafolio',
+        null=True,
+        blank=True,
+    )
+    descripcion = models.TextField()
+    estilo = models.CharField(max_length=150)
+    imagen = models.FileField(upload_to='portafolio/trabajos/', blank=True, null=True)
+    referencia = models.TextField(blank=True)
+    estado = models.CharField(max_length=20, choices=ESTADOS, default='PENDIENTE')
+    observacion_revision = models.TextField(blank=True)
+    revisado_por = models.ForeignKey(
+        'seguridad.Usuario',
+        on_delete=models.SET_NULL,
+        db_column='revisado_por',
+        related_name='trabajos_portafolio_revisados',
+        null=True,
+        blank=True,
+    )
+    fecha_revision = models.DateTimeField(null=True, blank=True)
+    fecha_registro = models.DateTimeField(auto_now_add=True)
+    fecha_actualizacion = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = '"agenda"."trabajo_portafolio"'
+        verbose_name = 'Trabajo de portafolio'
+        verbose_name_plural = 'Trabajos de portafolio'
+        ordering = ['-fecha_registro']
+
+    def __str__(self):
+        return f"{self.estilo} - {self.codigo_barbero.codigo}"
+
+    @classmethod
+    def consultar(cls):
+        return cls.objects.select_related(
+            'codigo_barbero',
+            'id_servicio',
+            'id_atencion',
+            'revisado_por',
+        )
+
+    def cambiar_estado(self, estado, usuario=None, observacion=''):
+        self.estado = estado
+        if usuario:
+            self.revisado_por = usuario
+        if observacion:
+            self.observacion_revision = observacion
+        from django.utils import timezone
+        self.fecha_revision = timezone.now()
+        self.save(update_fields=['estado', 'revisado_por', 'observacion_revision', 'fecha_revision', 'fecha_actualizacion'])
+        return self

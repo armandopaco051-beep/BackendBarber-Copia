@@ -1,9 +1,8 @@
-.env
 vapid_private.pem
 logs/
 *.log
 __pycache__/
 *.py[cod]
-
+media/
 .env
 .env.backup

@@ -111,6 +111,64 @@ class PlanComision(models.Model):
         return self
 
 
+class CampaniaFidelizacion(models.Model):
+    # Gestionar campanias de fidelizacion para clientes frecuentes.
+    TIPOS_CONDICION = (
+        ('VISITAS', 'Cantidad de visitas'),
+        ('SERVICIOS', 'Servicios acumulados'),
+        ('MONTO', 'Monto acumulado'),
+    )
+    TIPOS_BENEFICIO = (
+        ('DESCUENTO_PORCENTAJE', 'Descuento porcentual'),
+        ('DESCUENTO_MONTO', 'Descuento por monto'),
+        ('SERVICIO_GRATIS', 'Servicio gratis'),
+        ('PRODUCTO_GRATIS', 'Producto gratis'),
+    )
+    ESTADOS = (
+        ('PROGRAMADA', 'Programada'),
+        ('ACTIVA', 'Activa'),
+        ('INACTIVA', 'Inactiva'),
+        ('FINALIZADA', 'Finalizada'),
+    )
+
+    id_campania = models.AutoField(primary_key=True)
+    nombre = models.CharField(max_length=150)
+    descripcion = models.TextField(blank=True)
+    tipo_condicion = models.CharField(max_length=30, choices=TIPOS_CONDICION)
+    valor_condicion = models.DecimalField(max_digits=12, decimal_places=2)
+    tipo_beneficio = models.CharField(max_length=30, choices=TIPOS_BENEFICIO)
+    valor_beneficio = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    beneficio = models.TextField()
+    fecha_inicio = models.DateField()
+    fecha_fin = models.DateField()
+    estado = models.CharField(max_length=20, choices=ESTADOS, default='PROGRAMADA')
+    fecha_registro = models.DateTimeField(auto_now_add=True)
+    fecha_actualizacion = models.DateTimeField(auto_now=True)
+    servicios_aplicables = models.ManyToManyField(
+        Servicio,
+        related_name='campanias_fidelizacion',
+        blank=True,
+    )
+
+    class Meta:
+        db_table = 'ventas_caja_campania_fidelizacion'
+        verbose_name = 'Campania de fidelizacion'
+        verbose_name_plural = 'Campanias de fidelizacion'
+        ordering = ['-fecha_inicio', 'nombre']
+
+    def __str__(self):
+        return self.nombre
+
+    @classmethod
+    def consultar(cls):
+        return cls.objects.prefetch_related('servicios_aplicables')
+
+    def cambiar_estado(self, estado):
+        self.estado = estado
+        self.save(update_fields=['estado', 'fecha_actualizacion'])
+        return self
+
+
 class Caja(models.Model):
     ESTADOS = (
         ('ABIERTA', 'Abierta'),

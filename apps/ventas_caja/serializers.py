@@ -1,10 +1,13 @@
 from drf_spectacular.utils import extend_schema_field
+from django.utils import timezone
 from rest_framework import serializers
 
 from apps.seguridad.models import Usuario
+from apps.servicios.models import Servicio
 
 from .models import (
     Caja,
+    CampaniaFidelizacion,
     ComisionVenta,
     DetalleVenta,
     CuotaVenta,
@@ -144,6 +147,132 @@ class PlanComisionSerializer(serializers.ModelSerializer):
                 })
 
         return data
+
+
+class CampaniaFidelizacionSerializer(serializers.ModelSerializer):
+    # Serializer del caso de uso Gestionar campanias de fidelizacion.
+    servicios_aplicables = serializers.PrimaryKeyRelatedField(
+        queryset=Servicio.objects.filter(estado='ACTIVO'),
+        many=True,
+        required=False,
+    )
+    servicios_detalle = serializers.SerializerMethodField(read_only=True)
+    estado = serializers.CharField(max_length=20, required=False)
+
+    class Meta:
+        model = CampaniaFidelizacion
+        fields = [
+            'id_campania',
+            'nombre',
+            'descripcion',
+            'tipo_condicion',
+            'valor_condicion',
+            'tipo_beneficio',
+            'valor_beneficio',
+            'beneficio',
+            'fecha_inicio',
+            'fecha_fin',
+            'estado',
+            'servicios_aplicables',
+            'servicios_detalle',
+            'fecha_registro',
+            'fecha_actualizacion',
+        ]
+        read_only_fields = ['fecha_registro', 'fecha_actualizacion']
+
+    @extend_schema_field(serializers.ListField(child=serializers.DictField()))
+    def get_servicios_detalle(self, obj):
+        return [
+            {
+                'id_servicio': servicio.id_servicio,
+                'nombre': servicio.nombre,
+                'precio': servicio.precio,
+                'estado': servicio.estado,
+            }
+            for servicio in obj.servicios_aplicables.all()
+        ]
+
+    def validate_nombre(self, value):
+        nombre = value.strip()
+        if not nombre:
+            raise serializers.ValidationError("El nombre de la campania es obligatorio.")
+        duplicada = CampaniaFidelizacion.objects.filter(nombre__iexact=nombre)
+        if self.instance:
+            duplicada = duplicada.exclude(pk=self.instance.pk)
+        if duplicada.exists():
+            raise serializers.ValidationError("Ya existe una campania con ese nombre.")
+        return nombre
+
+    def validate_tipo_condicion(self, value):
+        tipo = value.upper()
+        if tipo not in dict(CampaniaFidelizacion.TIPOS_CONDICION):
+            raise serializers.ValidationError("Condicion invalida.")
+        return tipo
+
+    def validate_tipo_beneficio(self, value):
+        tipo = value.upper()
+        if tipo not in dict(CampaniaFidelizacion.TIPOS_BENEFICIO):
+            raise serializers.ValidationError("Tipo de beneficio invalido.")
+        return tipo
+
+    def validate_estado(self, value):
+        estado = value.upper()
+        if estado not in dict(CampaniaFidelizacion.ESTADOS):
+            raise serializers.ValidationError("Estado invalido.")
+        return estado
+
+    def validate_valor_condicion(self, value):
+        if value <= 0:
+            raise serializers.ValidationError("El valor de la condicion debe ser mayor a 0.")
+        return value
+
+    def validate_beneficio(self, value):
+        beneficio = value.strip()
+        if not beneficio:
+            raise serializers.ValidationError("El beneficio debe estar definido.")
+        return beneficio
+
+    def validate_servicios_aplicables(self, value):
+        ids = [servicio.pk for servicio in value]
+        if len(ids) != len(set(ids)):
+            raise serializers.ValidationError("No puede repetir servicios aplicables.")
+        return value
+
+    def validate(self, data):
+        # Valida condicion, beneficio y rango de fechas de la campania.
+        instance = getattr(self, 'instance', None)
+        fecha_inicio = data.get('fecha_inicio', getattr(instance, 'fecha_inicio', None))
+        fecha_fin = data.get('fecha_fin', getattr(instance, 'fecha_fin', None))
+        tipo_beneficio = data.get('tipo_beneficio', getattr(instance, 'tipo_beneficio', None))
+        valor_beneficio = data.get('valor_beneficio', getattr(instance, 'valor_beneficio', None))
+
+        if not fecha_inicio or not fecha_fin:
+            raise serializers.ValidationError({'fecha_inicio': 'Debe definir fecha de inicio y fecha de fin.'})
+        if fecha_fin < fecha_inicio:
+            raise serializers.ValidationError({'fecha_fin': 'La fecha de fin no puede ser anterior a la fecha de inicio.'})
+        if tipo_beneficio in ['DESCUENTO_PORCENTAJE', 'DESCUENTO_MONTO'] and (valor_beneficio is None or valor_beneficio <= 0):
+            raise serializers.ValidationError({'valor_beneficio': 'Debe definir un valor de beneficio mayor a 0.'})
+        if tipo_beneficio == 'DESCUENTO_PORCENTAJE' and valor_beneficio > 100:
+            raise serializers.ValidationError({'valor_beneficio': 'El descuento porcentual no puede superar 100.'})
+
+        if 'estado' not in data and not instance:
+            data['estado'] = 'ACTIVA' if fecha_inicio <= timezone.localdate() <= fecha_fin else 'PROGRAMADA'
+        return data
+
+    def create(self, validated_data):
+        servicios = validated_data.pop('servicios_aplicables', [])
+        campania = CampaniaFidelizacion.objects.create(**validated_data)
+        campania.servicios_aplicables.set(servicios)
+        return campania
+
+    def update(self, instance, validated_data):
+        servicios = validated_data.pop('servicios_aplicables', None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        if servicios is not None:
+            instance.servicios_aplicables.set(servicios)
+        return instance
 
 
 class MovimientoCajaSerializer(serializers.ModelSerializer):

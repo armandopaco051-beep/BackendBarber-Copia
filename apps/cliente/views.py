@@ -1,15 +1,19 @@
 from django.utils import timezone
+from django.db.models import Sum
 from drf_spectacular.utils import extend_schema, OpenApiExample, OpenApiResponse
 from rest_framework import status
 from rest_framework.permissions import BasePermission
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.citas.models import Cita
+from apps.citas.models import AtencionServicio, Cita, DetalleAtencionServicio
 from apps.citas.serializers import CitaSerializer, ESTADOS_NO_BLOQUEAN_HORARIO
 from apps.citas.views import DisponibilidadBarberoView
 from apps.seguridad.permissions import EsAdmin
 from apps.seguridad.views import registrar_bitacora
+from apps.servicios.models import RecomendacionCuidado
+from apps.servicios.serializers import RecomendacionCuidadoSerializer
+from apps.ventas_caja.models import CampaniaFidelizacion, Venta
 
 from .models import EncuestaSatisfaccion, ReclamoSugerencia
 from .serializers import (
@@ -17,6 +21,7 @@ from .serializers import (
     EncuestaSatisfaccionSerializer,
     ReclamoSugerenciaSerializer,
     RespuestaReclamoSugerenciaSerializer,
+    RespuestaEncuestaSatisfaccionSerializer,
 )
 
 
@@ -231,6 +236,153 @@ class ClienteCitaDetalleView(APIView):
             serializer.save()
             registrar_bitacora(request, 'CLIENTE_CANCELAR_CITA', f'Cliente cancelo cita: {cita.id_cita}.', cliente)
             return Response({'mensaje': 'Cita cancelada correctamente.'}, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@extend_schema(tags=['Cliente - Recomendaciones'])
+class ClienteRecomendacionListView(APIView):
+    permission_classes = [EsCliente]
+
+    @extend_schema(
+        summary='Consultar recomendaciones recibidas',
+        description='Lista recomendaciones de cuidado registradas por barberos para el cliente autenticado.',
+        responses={200: RecomendacionCuidadoSerializer(many=True)}
+    )
+    def get(self, request):
+        cliente = obtener_cliente_actual(request)
+        recomendaciones = RecomendacionCuidado.consultar().filter(codigo_cliente=cliente, estado='ACTIVO')
+        fecha_desde = request.query_params.get('fecha_desde')
+        fecha_hasta = request.query_params.get('fecha_hasta')
+        id_servicio = request.query_params.get('id_servicio')
+
+        if fecha_desde:
+            recomendaciones = recomendaciones.filter(id_atencion__fecha__gte=fecha_desde)
+        if fecha_hasta:
+            recomendaciones = recomendaciones.filter(id_atencion__fecha__lte=fecha_hasta)
+        if id_servicio:
+            recomendaciones = recomendaciones.filter(id_atencion__id_cita__id_servicio_id=id_servicio)
+
+        registrar_bitacora(request, 'CONSULTAR_RECOMENDACIONES_CLIENTE', 'Cliente consulta recomendaciones recibidas.')
+        return Response(
+            {
+                'mensaje': 'No existen recomendaciones registradas.' if not recomendaciones.exists() else 'Recomendaciones consultadas correctamente.',
+                'recomendaciones': RecomendacionCuidadoSerializer(recomendaciones, many=True).data,
+            },
+            status=status.HTTP_200_OK
+        )
+
+
+@extend_schema(tags=['Cliente - Fidelizacion'])
+class ClienteBeneficioFidelizacionView(APIView):
+    permission_classes = [EsCliente]
+
+    def _metricas_cliente(self, cliente):
+        atenciones_finalizadas = AtencionServicio.objects.filter(codigo_cliente=cliente, estado='FINALIZADA')
+        ventas_pagadas = Venta.objects.filter(codigo_cliente=cliente, estado='PAGADA')
+        servicios_acumulados = DetalleAtencionServicio.objects.filter(
+            id_atencion__codigo_cliente=cliente,
+            id_atencion__estado='FINALIZADA',
+        ).aggregate(total=Sum('cantidad'))['total'] or 0
+
+        return {
+            'visitas': atenciones_finalizadas.count(),
+            'servicios': servicios_acumulados,
+            'monto': ventas_pagadas.aggregate(total=Sum('total'))['total'] or 0,
+        }
+
+    def _avance_campania(self, campania, metricas):
+        acumulado = metricas.get(campania.tipo_condicion.lower(), 0)
+        requerido = campania.valor_condicion
+        faltante = max(requerido - acumulado, 0)
+        return {
+            'id_campania': campania.id_campania,
+            'nombre': campania.nombre,
+            'descripcion': campania.descripcion,
+            'tipo_condicion': campania.tipo_condicion,
+            'valor_condicion': requerido,
+            'acumulado_cliente': acumulado,
+            'faltante': faltante,
+            'beneficio_disponible': acumulado >= requerido,
+            'tipo_beneficio': campania.tipo_beneficio,
+            'valor_beneficio': campania.valor_beneficio,
+            'beneficio': campania.beneficio,
+            'fecha_inicio': campania.fecha_inicio,
+            'fecha_fin': campania.fecha_fin,
+        }
+
+    @extend_schema(
+        summary='Consultar beneficios de fidelizacion',
+        description='Calcula visitas, servicios o monto acumulado del cliente contra campanias activas.',
+        responses={200: OpenApiResponse(description='Beneficios y avance de fidelizacion.')}
+    )
+    def get(self, request):
+        cliente = obtener_cliente_actual(request)
+        hoy = timezone.localdate()
+        campanias = CampaniaFidelizacion.consultar().filter(
+            estado='ACTIVA',
+            fecha_inicio__lte=hoy,
+            fecha_fin__gte=hoy,
+        )
+        if not campanias.exists():
+            return Response({'mensaje': 'No existen campanias activas.', 'beneficios': []}, status=status.HTTP_200_OK)
+
+        metricas = self._metricas_cliente(cliente)
+        if not any(metricas.values()):
+            return Response(
+                {'mensaje': 'Cliente sin historial.', 'metricas': metricas, 'beneficios': []},
+                status=status.HTTP_200_OK
+            )
+
+        beneficios = [self._avance_campania(campania, metricas) for campania in campanias]
+        registrar_bitacora(request, 'CONSULTAR_BENEFICIOS_FIDELIZACION', 'Cliente consulta beneficios de fidelizacion.')
+        return Response(
+            {
+                'mensaje': 'Beneficios de fidelizacion consultados correctamente.',
+                'metricas': metricas,
+                'beneficios': beneficios,
+            },
+            status=status.HTTP_200_OK
+        )
+
+
+@extend_schema(tags=['Cliente - Encuestas'])
+class ClienteResponderEncuestaView(APIView):
+    permission_classes = [EsCliente]
+
+    @extend_schema(
+        summary='Responder encuesta de satisfaccion',
+        request=RespuestaEncuestaSatisfaccionSerializer,
+        responses={
+            201: OpenApiResponse(description='Encuesta respondida.'),
+            400: OpenApiResponse(description='Encuesta ya respondida, inactiva o respuestas incompletas.'),
+        },
+        examples=[
+            OpenApiExample(
+                'Responder encuesta',
+                value={
+                    'id_encuesta': 1,
+                    'id_atencion': 1,
+                    'respuestas': [
+                        {'id_pregunta': 1, 'id_opcion': 5},
+                        {'id_pregunta': 2, 'respuesta_texto': 'Muy buena atencion.'},
+                    ],
+                },
+                request_only=True,
+            )
+        ]
+    )
+    def post(self, request):
+        serializer = RespuestaEncuestaSatisfaccionSerializer(data=request.data, context={'request': request})
+        if serializer.is_valid():
+            respuesta = serializer.save()
+            registrar_bitacora(request, 'RESPONDER_ENCUESTA_SATISFACCION', f'Encuesta respondida: {respuesta.id_respuesta}.')
+            return Response(
+                {
+                    'mensaje': 'Encuesta respondida correctamente.',
+                    'respuesta': RespuestaEncuestaSatisfaccionSerializer(respuesta).data,
+                },
+                status=status.HTTP_201_CREATED
+            )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 

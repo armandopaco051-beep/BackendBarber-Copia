@@ -170,3 +170,82 @@ class ReclamoSugerencia(models.Model):
         self.estado = estado
         self.save(update_fields=['estado', 'fecha_actualizacion'])
         return self
+
+
+# Caso de uso: Responder encuesta de satisfaccion.
+# Cabecera de respuestas enviadas por un cliente para una atencion finalizada.
+class RespuestaEncuestaSatisfaccion(models.Model):
+    id_respuesta = models.AutoField(primary_key=True)
+    id_encuesta = models.ForeignKey(
+        EncuestaSatisfaccion,
+        on_delete=models.PROTECT,
+        db_column='id_encuesta',
+        related_name='respuestas'
+    )
+    id_atencion = models.ForeignKey(
+        'citas.AtencionServicio',
+        on_delete=models.PROTECT,
+        db_column='id_atencion',
+        related_name='respuestas_encuesta'
+    )
+    codigo_cliente = models.ForeignKey(
+        'seguridad.Usuario',
+        on_delete=models.PROTECT,
+        db_column='codigo_cliente',
+        related_name='respuestas_encuestas'
+    )
+    fecha_registro = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = '"agenda"."respuesta_encuesta_satisfaccion"'
+        verbose_name = 'Respuesta de encuesta de satisfaccion'
+        verbose_name_plural = 'Respuestas de encuestas de satisfaccion'
+        ordering = ['-fecha_registro']
+        unique_together = ('id_encuesta', 'id_atencion', 'codigo_cliente')
+
+    def __str__(self):
+        return f"Respuesta {self.id_respuesta} - {self.codigo_cliente.codigo}"
+
+    @classmethod
+    def consultar(cls):
+        return cls.objects.select_related(
+            'id_encuesta',
+            'id_atencion',
+            'codigo_cliente',
+        ).prefetch_related('detalles')
+
+
+class DetalleRespuestaEncuesta(models.Model):
+    id_detalle = models.AutoField(primary_key=True)
+    id_respuesta = models.ForeignKey(
+        RespuestaEncuestaSatisfaccion,
+        on_delete=models.CASCADE,
+        db_column='id_respuesta',
+        related_name='detalles'
+    )
+    id_pregunta = models.ForeignKey(
+        PreguntaEncuesta,
+        on_delete=models.PROTECT,
+        db_column='id_pregunta',
+        related_name='respuestas_detalle'
+    )
+    id_opcion = models.ForeignKey(
+        OpcionRespuestaEncuesta,
+        on_delete=models.PROTECT,
+        db_column='id_opcion',
+        related_name='respuestas_detalle',
+        null=True,
+        blank=True,
+    )
+    respuesta_texto = models.TextField(blank=True)
+    valor = models.PositiveIntegerField(null=True, blank=True)
+
+    class Meta:
+        db_table = '"agenda"."detalle_respuesta_encuesta"'
+        verbose_name = 'Detalle de respuesta de encuesta'
+        verbose_name_plural = 'Detalles de respuestas de encuesta'
+        ordering = ['id_respuesta', 'id_pregunta']
+        unique_together = ('id_respuesta', 'id_pregunta')
+
+    def __str__(self):
+        return f"{self.id_respuesta_id} - {self.id_pregunta_id}"
