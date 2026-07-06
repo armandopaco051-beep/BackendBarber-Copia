@@ -1,16 +1,19 @@
 from rest_framework import serializers
 from drf_spectacular.utils import extend_schema_field
 
-from apps.citas.models import AtencionServicio
+from apps.citas.models import AtencionServicio, Cita
 from apps.inventario.models import Producto
+from apps.seguridad.models import Usuario
 
 from .models import (
     CategoriaServicio,
     DetallePaqueteServicio,
     DetalleProductoRecomendacion,
+    DiagnosticoCapilar,
     PaqueteServicio,
     RecomendacionCuidado,
     Servicio,
+    TrabajoPortafolio,
 )
 
 
@@ -406,3 +409,224 @@ class RecomendacionCuidadoSerializer(serializers.ModelSerializer):
             self._actualizar_productos(instance, productos)
 
         return instance
+
+
+class DiagnosticoCapilarSerializer(serializers.ModelSerializer):
+    # Serializer del caso de uso Registrar diagnostico capilar del cliente.
+    codigo_cliente = serializers.PrimaryKeyRelatedField(
+        queryset=Usuario.objects.select_related('id_rol').filter(id_rol__nombre__iexact='cliente')
+    )
+    id_cita = serializers.PrimaryKeyRelatedField(queryset=Cita.objects.select_related('codigo_cliente', 'codigo_barbero').all(), required=False, allow_null=True)
+    id_atencion = serializers.PrimaryKeyRelatedField(queryset=AtencionServicio.objects.select_related('codigo_cliente', 'codigo_barbero', 'id_cita').all(), required=False, allow_null=True)
+    codigo_barbero = serializers.PrimaryKeyRelatedField(read_only=True)
+    cliente = serializers.SerializerMethodField(read_only=True)
+    barbero = serializers.SerializerMethodField(read_only=True)
+    servicio = serializers.SerializerMethodField(read_only=True)
+    estado = serializers.CharField(max_length=20, required=False)
+
+    class Meta:
+        model = DiagnosticoCapilar
+        fields = [
+            'id_diagnostico',
+            'codigo_cliente',
+            'cliente',
+            'codigo_barbero',
+            'barbero',
+            'id_cita',
+            'id_atencion',
+            'servicio',
+            'tipo_cabello',
+            'condicion_cuero_cabelludo',
+            'observaciones',
+            'necesidades_detectadas',
+            'cuidados_sugeridos',
+            'estado',
+            'fecha_registro',
+            'fecha_actualizacion',
+        ]
+        read_only_fields = ['codigo_barbero', 'fecha_registro', 'fecha_actualizacion']
+
+    @extend_schema_field(serializers.CharField())
+    def get_cliente(self, obj):
+        return f"{obj.codigo_cliente.nombre} {obj.codigo_cliente.apellido}".strip()
+
+    @extend_schema_field(serializers.CharField())
+    def get_barbero(self, obj):
+        return f"{obj.codigo_barbero.nombre} {obj.codigo_barbero.apellido}".strip()
+
+    @extend_schema_field(serializers.CharField(allow_null=True))
+    def get_servicio(self, obj):
+        cita = obj.id_cita or (obj.id_atencion.id_cita if obj.id_atencion_id else None)
+        return cita.id_servicio.nombre if cita and cita.id_servicio_id else None
+
+    def _validar_texto_obligatorio(self, value, mensaje):
+        texto = value.strip()
+        if not texto:
+            raise serializers.ValidationError(mensaje)
+        return texto
+
+    def validate_tipo_cabello(self, value):
+        return self._validar_texto_obligatorio(value, "El tipo de cabello es obligatorio.")
+
+    def validate_condicion_cuero_cabelludo(self, value):
+        return self._validar_texto_obligatorio(value, "La condicion del cuero cabelludo es obligatoria.")
+
+    def validate_necesidades_detectadas(self, value):
+        return self._validar_texto_obligatorio(value, "Las necesidades detectadas son obligatorias.")
+
+    def validate_estado(self, value):
+        estado = value.upper()
+        if estado not in dict(DiagnosticoCapilar.ESTADOS):
+            raise serializers.ValidationError("Estado invalido.")
+        return estado
+
+    def validate(self, data):
+        # El barbero autenticado registra el diagnostico sobre una cita o atencion real del cliente.
+        request = self.context.get('request')
+        usuario_actual = getattr(request, 'usuario_actual', None) if request else None
+        instance = getattr(self, 'instance', None)
+        cliente = data.get('codigo_cliente', getattr(instance, 'codigo_cliente', None))
+        cita = data.get('id_cita', getattr(instance, 'id_cita', None))
+        atencion = data.get('id_atencion', getattr(instance, 'id_atencion', None))
+
+        if not usuario_actual or not usuario_actual.es_barbero:
+            raise serializers.ValidationError('Usuario sin rol de barbero.')
+        if not cliente or not cliente.es_cliente:
+            raise serializers.ValidationError({'codigo_cliente': 'Cliente inexistente.'})
+        if not cita and not atencion:
+            raise serializers.ValidationError({'id_cita': 'Debe asociar una cita o atencion del cliente.'})
+        if cita and cita.codigo_cliente_id != cliente.codigo:
+            raise serializers.ValidationError({'id_cita': 'La cita no pertenece al cliente seleccionado.'})
+        if cita and cita.codigo_barbero_id != usuario_actual.codigo:
+            raise serializers.ValidationError({'id_cita': 'La cita no corresponde al barbero autenticado.'})
+        if atencion and atencion.codigo_cliente_id != cliente.codigo:
+            raise serializers.ValidationError({'id_atencion': 'La atencion no pertenece al cliente seleccionado.'})
+        if atencion and atencion.codigo_barbero_id != usuario_actual.codigo:
+            raise serializers.ValidationError({'id_atencion': 'La atencion no corresponde al barbero autenticado.'})
+        if cita and atencion and atencion.id_cita_id != cita.id_cita:
+            raise serializers.ValidationError({'id_atencion': 'La atencion no corresponde a la cita seleccionada.'})
+
+        return data
+
+    def create(self, validated_data):
+        # El barbero se toma de la sesion para evitar que se suplante otro usuario.
+        request = self.context.get('request')
+        barbero = getattr(request, 'usuario_actual', None) if request else None
+        return DiagnosticoCapilar.objects.create(codigo_barbero=barbero, **validated_data)
+
+
+class TrabajoPortafolioSerializer(serializers.ModelSerializer):
+    # Serializer del caso de uso Gestionar portafolio de trabajos realizados.
+    id_servicio = serializers.PrimaryKeyRelatedField(queryset=Servicio.objects.filter(estado='ACTIVO'))
+    id_atencion = serializers.PrimaryKeyRelatedField(queryset=AtencionServicio.objects.select_related('codigo_barbero').all(), required=False, allow_null=True)
+    codigo_barbero = serializers.PrimaryKeyRelatedField(read_only=True)
+    barbero = serializers.SerializerMethodField(read_only=True)
+    servicio = serializers.CharField(source='id_servicio.nombre', read_only=True)
+    imagen_url = serializers.SerializerMethodField(read_only=True)
+    estado = serializers.CharField(max_length=20, required=False)
+
+    class Meta:
+        model = TrabajoPortafolio
+        fields = [
+            'id_trabajo',
+            'codigo_barbero',
+            'barbero',
+            'id_servicio',
+            'servicio',
+            'id_atencion',
+            'descripcion',
+            'estilo',
+            'imagen',
+            'imagen_url',
+            'referencia',
+            'estado',
+            'observacion_revision',
+            'revisado_por',
+            'fecha_revision',
+            'fecha_registro',
+            'fecha_actualizacion',
+        ]
+        read_only_fields = ['codigo_barbero', 'revisado_por', 'fecha_revision', 'fecha_registro', 'fecha_actualizacion']
+
+    @extend_schema_field(serializers.CharField())
+    def get_barbero(self, obj):
+        return f"{obj.codigo_barbero.nombre} {obj.codigo_barbero.apellido}".strip()
+
+    @extend_schema_field(serializers.CharField(allow_null=True))
+    def get_imagen_url(self, obj):
+        if not obj.imagen:
+            return None
+        request = self.context.get('request')
+        return request.build_absolute_uri(obj.imagen.url) if request else obj.imagen.url
+
+    def _validar_texto(self, value, mensaje):
+        texto = value.strip()
+        if not texto:
+            raise serializers.ValidationError(mensaje)
+        return texto
+
+    def validate_descripcion(self, value):
+        return self._validar_texto(value, "La descripcion del trabajo es obligatoria.")
+
+    def validate_estilo(self, value):
+        return self._validar_texto(value, "El estilo del trabajo es obligatorio.")
+
+    def validate_estado(self, value):
+        estado = value.upper()
+        if estado not in dict(TrabajoPortafolio.ESTADOS):
+            raise serializers.ValidationError("Estado invalido.")
+        return estado
+
+    def validate_imagen(self, value):
+        if not value:
+            return value
+        tipo = getattr(value, 'content_type', '') or ''
+        if not tipo.startswith('image/'):
+            raise serializers.ValidationError("Formato de imagen no valido. Debe subir un archivo de imagen.")
+        return value
+
+    def validate(self, data):
+        request = self.context.get('request')
+        usuario = getattr(request, 'usuario_actual', None) if request else None
+        instance = getattr(self, 'instance', None)
+        atencion = data.get('id_atencion', getattr(instance, 'id_atencion', None))
+
+        if not usuario or not (usuario.es_barbero or usuario.es_admin):
+            raise serializers.ValidationError('Usuario sin permisos.')
+        if atencion:
+            if atencion.estado != 'FINALIZADA':
+                raise serializers.ValidationError({'id_atencion': 'La atencion asociada debe estar finalizada.'})
+            if usuario.es_barbero and atencion.codigo_barbero_id != usuario.codigo:
+                raise serializers.ValidationError({'id_atencion': 'La atencion no corresponde al barbero autenticado.'})
+
+        if usuario.es_barbero:
+            data['estado'] = 'PENDIENTE'
+        return data
+
+    def create(self, validated_data):
+        request = self.context.get('request')
+        usuario = getattr(request, 'usuario_actual', None) if request else None
+        return TrabajoPortafolio.objects.create(codigo_barbero=usuario, **validated_data)
+
+
+class RevisionTrabajoPortafolioSerializer(serializers.Serializer):
+    # Serializer para que el administrador apruebe o rechace trabajos del portafolio.
+    estado = serializers.CharField(max_length=20)
+    observacion_revision = serializers.CharField(required=False, allow_blank=True)
+
+    ESTADOS_REVISION = ['APROBADO', 'RECHAZADO', 'INACTIVO']
+
+    def validate_estado(self, value):
+        estado = value.upper()
+        if estado not in self.ESTADOS_REVISION:
+            raise serializers.ValidationError("Estado invalido para revision.")
+        return estado
+
+    def update(self, instance, validated_data):
+        request = self.context.get('request')
+        usuario = getattr(request, 'usuario_actual', None) if request else None
+        return instance.cambiar_estado(
+            validated_data['estado'],
+            usuario=usuario,
+            observacion=validated_data.get('observacion_revision', ''),
+        )

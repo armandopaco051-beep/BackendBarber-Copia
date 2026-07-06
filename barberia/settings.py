@@ -222,3 +222,7 @@ USE_TZ = True
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
+
+# Archivos subidos por el sistema, como imagenes del portafolio de trabajos.
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'

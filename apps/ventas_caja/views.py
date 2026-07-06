@@ -11,11 +11,12 @@ from apps.seguridad.permissions import EsAdmin, TienePermiso
 from apps.seguridad.views import registrar_bitacora
 
 from .comprobantes import comprobante_venta_pdf
-from .models import Caja, MetodoPago, MovimientoCaja, PlanComision, Venta, VentaCuotas
+from .models import Caja, CampaniaFidelizacion, MetodoPago, MovimientoCaja, PlanComision, Venta, VentaCuotas
 from .serializers import (
     CajaAperturaSerializer,
     CajaCierreSerializer,
     CajaSerializer,
+    CampaniaFidelizacionSerializer,
     MetodoPagoSerializer,
     MovimientoCajaAnularSerializer,
     MovimientoCajaCrearSerializer,
@@ -285,6 +286,143 @@ class PlanComisionDetalleView(APIView):
         plan.cambiar_estado('INACTIVO')
         registrar_bitacora(request, 'DESACTIVAR_PLAN_COMISION', f'Plan de comision desactivado: {plan.id_plan_comision}.')
         return Response({'mensaje': 'Plan de comision desactivado correctamente.'}, status=status.HTTP_200_OK)
+
+
+@extend_schema(tags=["Gestionar Campanias de Fidelizacion"])
+class CampaniaFidelizacionListCreateView(APIView):
+    permission_classes = [EsAdmin]
+    serializer_class = CampaniaFidelizacionSerializer
+
+    @extend_schema(
+        summary="Listar campanias de fidelizacion",
+        responses={200: CampaniaFidelizacionSerializer(many=True)}
+    )
+    def get(self, request):
+        campanias = CampaniaFidelizacion.consultar()
+        estado_filtro = request.query_params.get('estado')
+        tipo_condicion = request.query_params.get('tipo_condicion')
+        nombre = request.query_params.get('nombre')
+
+        if estado_filtro:
+            campanias = campanias.filter(estado=estado_filtro.upper())
+        if tipo_condicion:
+            campanias = campanias.filter(tipo_condicion=tipo_condicion.upper())
+        if nombre:
+            campanias = campanias.filter(nombre__icontains=nombre)
+
+        registrar_bitacora(request, 'CONSULTAR_CAMPANIAS_FIDELIZACION', 'Consulta de campanias de fidelizacion.')
+        return Response(CampaniaFidelizacionSerializer(campanias, many=True).data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        summary="Registrar campania de fidelizacion",
+        request=CampaniaFidelizacionSerializer,
+        responses={
+            201: OpenApiResponse(description="Campania registrada."),
+            400: OpenApiResponse(description="Datos invalidos."),
+        },
+        examples=[
+            OpenApiExample(
+                "Registrar campania",
+                value={
+                    "nombre": "Cliente frecuente mensual",
+                    "descripcion": "Beneficio para clientes con visitas recurrentes.",
+                    "tipo_condicion": "VISITAS",
+                    "valor_condicion": "5.00",
+                    "tipo_beneficio": "DESCUENTO_PORCENTAJE",
+                    "valor_beneficio": "15.00",
+                    "beneficio": "15% de descuento en servicios seleccionados.",
+                    "fecha_inicio": "2026-07-01",
+                    "fecha_fin": "2026-07-31",
+                    "servicios_aplicables": [1, 2],
+                },
+                request_only=True,
+            )
+        ]
+    )
+    def post(self, request):
+        serializer = CampaniaFidelizacionSerializer(data=request.data)
+        if serializer.is_valid():
+            campania = serializer.save()
+            registrar_bitacora(request, 'CREAR_CAMPANIA_FIDELIZACION', f'Campania creada: {campania.id_campania}.')
+            return Response(
+                {'mensaje': 'Campania de fidelizacion registrada correctamente.', 'campania': CampaniaFidelizacionSerializer(campania).data},
+                status=status.HTTP_201_CREATED
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@extend_schema(tags=["Gestionar Campanias de Fidelizacion"])
+class CampaniaFidelizacionDetalleView(APIView):
+    permission_classes = [EsAdmin]
+    serializer_class = CampaniaFidelizacionSerializer
+
+    def _get_campania(self, id_campania):
+        return CampaniaFidelizacion.consultar().filter(pk=id_campania).first()
+
+    @extend_schema(
+        summary="Ver detalle de campania de fidelizacion",
+        responses={200: CampaniaFidelizacionSerializer, 404: OpenApiResponse(description="No encontrada.")}
+    )
+    def get(self, request, id_campania):
+        campania = self._get_campania(id_campania)
+        if not campania:
+            return Response({'error': 'Campania de fidelizacion no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(CampaniaFidelizacionSerializer(campania).data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        summary="Actualizar campania de fidelizacion",
+        request=CampaniaFidelizacionSerializer,
+        responses={
+            200: OpenApiResponse(description="Campania actualizada."),
+            400: OpenApiResponse(description="Datos invalidos."),
+            404: OpenApiResponse(description="No encontrada."),
+        }
+    )
+    def put(self, request, id_campania):
+        campania = self._get_campania(id_campania)
+        if not campania:
+            return Response({'error': 'Campania de fidelizacion no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        serializer = CampaniaFidelizacionSerializer(campania, data=request.data, partial=True)
+        if serializer.is_valid():
+            campania = serializer.save()
+            registrar_bitacora(request, 'ACTUALIZAR_CAMPANIA_FIDELIZACION', f'Campania actualizada: {campania.id_campania}.')
+            return Response(
+                {'mensaje': 'Campania de fidelizacion actualizada correctamente.', 'campania': CampaniaFidelizacionSerializer(campania).data},
+                status=status.HTTP_200_OK
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @extend_schema(
+        summary="Inactivar campania de fidelizacion",
+        responses={200: OpenApiResponse(description="Campania inactivada."), 404: OpenApiResponse(description="No encontrada.")}
+    )
+    def delete(self, request, id_campania):
+        campania = self._get_campania(id_campania)
+        if not campania:
+            return Response({'error': 'Campania de fidelizacion no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        campania.cambiar_estado('INACTIVA')
+        registrar_bitacora(request, 'INACTIVAR_CAMPANIA_FIDELIZACION', f'Campania inactivada: {campania.id_campania}.')
+        return Response({'mensaje': 'Campania de fidelizacion inactivada correctamente.'}, status=status.HTTP_200_OK)
+
+
+@extend_schema(tags=["Gestionar Campanias de Fidelizacion"])
+class CampaniaFidelizacionActivarView(APIView):
+    permission_classes = [EsAdmin]
+
+    @extend_schema(
+        summary="Activar campania de fidelizacion",
+        responses={200: OpenApiResponse(description="Campania activada."), 404: OpenApiResponse(description="No encontrada.")}
+    )
+    def post(self, request, id_campania):
+        campania = CampaniaFidelizacion.consultar().filter(pk=id_campania).first()
+        if not campania:
+            return Response({'error': 'Campania de fidelizacion no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+        campania.cambiar_estado('ACTIVA')
+        registrar_bitacora(request, 'ACTIVAR_CAMPANIA_FIDELIZACION', f'Campania activada: {campania.id_campania}.')
+        return Response(
+            {'mensaje': 'Campania de fidelizacion activada correctamente.', 'campania': CampaniaFidelizacionSerializer(campania).data},
+            status=status.HTTP_200_OK
+        )
 
 
 @extend_schema(tags=["CU18 - Gestionar Caja"])

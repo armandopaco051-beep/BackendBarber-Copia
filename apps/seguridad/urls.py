@@ -14,6 +14,8 @@ from .views import (
     HorarioBarberoListView,
     HorarioLaboralDetalleView,
     HorarioLaboralListCreateView,
+    PermisoLaboralPersonalDetalleView,
+    PermisoLaboralPersonalListCreateView,
     UsuarioListCreateView,
     UsuarioDetalleView,
     PermisoListView,
@@ -60,6 +62,8 @@ urlpatterns = [
     path('horarios-laborales/<int:id_horario>/', HorarioLaboralDetalleView.as_view(), name='horario-laboral-detalle'),
     path('bloqueos-horario/', BloqueoHorarioListCreateView.as_view(), name='bloqueo-horario-list-create'),
     path('bloqueos-horario/<int:id_bloqueo>/', BloqueoHorarioDetalleView.as_view(), name='bloqueo-horario-detalle'),
+    path('permisos-laborales/', PermisoLaboralPersonalListCreateView.as_view(), name='permiso-laboral-list-create'),
+    path('permisos-laborales/<int:id_permiso_laboral>/', PermisoLaboralPersonalDetalleView.as_view(), name='permiso-laboral-detalle'),
 
     # CU9: Gestionar asistencia
     path('asistencias/', AsistenciaBarberoListCreateView.as_view(), name='asistencia-barbero-list-create'),

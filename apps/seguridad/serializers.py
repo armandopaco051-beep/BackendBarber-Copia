@@ -3,7 +3,9 @@ from django.contrib.auth.hashers import make_password, check_password
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema_field
 from datetime import timedelta
-from .models import AsistenciaBarbero, Bitacora, BloqueoHorario, HorarioLaboral, Permiso, Rol, Usuario
+from apps.citas.models import Cita
+
+from .models import AsistenciaBarbero, Bitacora, BloqueoHorario, HorarioLaboral, Permiso, PermisoLaboralPersonal, Rol, Usuario
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -544,3 +546,81 @@ class AsistenciaBarberoSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Ya existe asistencia registrada para este barbero en esa fecha.")
 
         return data
+
+
+class PermisoLaboralPersonalSerializer(serializers.ModelSerializer):
+    # Serializer del caso de uso Gestionar permisos del personal.
+    codigo_barbero = serializers.PrimaryKeyRelatedField(
+        queryset=Usuario.objects.select_related('id_rol').filter(id_rol__nombre__iexact='barbero')
+    )
+    barbero = serializers.SerializerMethodField(read_only=True)
+    estado = serializers.CharField(max_length=20, required=False)
+    citas_activas = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = PermisoLaboralPersonal
+        fields = [
+            'id_permiso_laboral',
+            'codigo_barbero',
+            'barbero',
+            'fecha_inicio',
+            'fecha_fin',
+            'motivo',
+            'estado',
+            'respuesta_admin',
+            'registrado_por',
+            'citas_activas',
+            'fecha_registro',
+            'fecha_actualizacion',
+        ]
+        read_only_fields = ['registrado_por', 'fecha_registro', 'fecha_actualizacion']
+
+    @extend_schema_field(serializers.CharField())
+    def get_barbero(self, obj):
+        return f"{obj.codigo_barbero.nombre} {obj.codigo_barbero.apellido}".strip()
+
+    @extend_schema_field(serializers.IntegerField())
+    def get_citas_activas(self, obj):
+        return self._citas_activas(obj.codigo_barbero, obj.fecha_inicio, obj.fecha_fin).count()
+
+    def validate_estado(self, value):
+        estado = value.upper()
+        if estado not in dict(PermisoLaboralPersonal.ESTADOS):
+            raise serializers.ValidationError("Estado invalido.")
+        return estado
+
+    def validate_motivo(self, value):
+        motivo = value.strip()
+        if not motivo:
+            raise serializers.ValidationError("El motivo del permiso es obligatorio.")
+        return motivo
+
+    def _citas_activas(self, barbero, fecha_inicio, fecha_fin):
+        estados_no_bloquean = ['CANCELADA', 'ANULADA', 'FINALIZADA', 'NO_ASISTIO']
+        return Cita.objects.select_related('id_estadoc').filter(
+            codigo_barbero=barbero,
+            fecha__range=(fecha_inicio, fecha_fin),
+        ).exclude(id_estadoc__nombre__in=estados_no_bloquean)
+
+    def validate(self, data):
+        instance = getattr(self, 'instance', None)
+        barbero = data.get('codigo_barbero', getattr(instance, 'codigo_barbero', None))
+        fecha_inicio = data.get('fecha_inicio', getattr(instance, 'fecha_inicio', None))
+        fecha_fin = data.get('fecha_fin', getattr(instance, 'fecha_fin', None))
+        estado = data.get('estado', getattr(instance, 'estado', 'PENDIENTE'))
+
+        if not barbero or not barbero.es_barbero:
+            raise serializers.ValidationError({'codigo_barbero': 'Barbero inexistente.'})
+        if not fecha_inicio or not fecha_fin:
+            raise serializers.ValidationError({'fecha_inicio': 'Debe registrar fecha de inicio y fecha de fin.'})
+        if fecha_fin < fecha_inicio:
+            raise serializers.ValidationError({'fecha_fin': 'Permiso con fechas invalidas.'})
+        if estado == 'APROBADO' and self._citas_activas(barbero, fecha_inicio, fecha_fin).exists():
+            raise serializers.ValidationError('Barbero con citas activas sin reprogramacion.')
+
+        return data
+
+    def create(self, validated_data):
+        request = self.context.get('request')
+        usuario = getattr(request, 'usuario_actual', None) if request else None
+        return PermisoLaboralPersonal.objects.create(registrado_por=usuario, **validated_data)

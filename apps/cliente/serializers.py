@@ -2,11 +2,18 @@ from django.db import transaction
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
-from apps.citas.models import Cita
+from apps.citas.models import AtencionServicio, Cita
 from apps.citas.serializers import CitaSerializer
 from apps.servicios.models import Servicio
 
-from .models import EncuestaSatisfaccion, OpcionRespuestaEncuesta, PreguntaEncuesta, ReclamoSugerencia
+from .models import (
+    DetalleRespuestaEncuesta,
+    EncuestaSatisfaccion,
+    OpcionRespuestaEncuesta,
+    PreguntaEncuesta,
+    ReclamoSugerencia,
+    RespuestaEncuestaSatisfaccion,
+)
 
 
 class ClienteCitaSerializer(CitaSerializer):
@@ -160,6 +167,99 @@ class EncuestaSatisfaccionSerializer(serializers.ModelSerializer):
     @extend_schema_field(PreguntaEncuestaSerializer(many=True))
     def get_preguntas(self, obj):
         return PreguntaEncuestaSerializer(obj.preguntas.all(), many=True).data
+
+
+class DetalleRespuestaEncuestaSerializer(serializers.ModelSerializer):
+    # Respuesta individual de una pregunta de encuesta.
+    id_pregunta = serializers.PrimaryKeyRelatedField(queryset=PreguntaEncuesta.objects.select_related('id_encuesta').all())
+    id_opcion = serializers.PrimaryKeyRelatedField(queryset=OpcionRespuestaEncuesta.objects.select_related('id_pregunta').all(), required=False, allow_null=True)
+
+    class Meta:
+        model = DetalleRespuestaEncuesta
+        fields = ['id_detalle', 'id_pregunta', 'id_opcion', 'respuesta_texto', 'valor']
+
+
+class RespuestaEncuestaSatisfaccionSerializer(serializers.ModelSerializer):
+    # Serializer del caso de uso Responder encuesta de satisfaccion.
+    id_encuesta = serializers.PrimaryKeyRelatedField(queryset=EncuestaSatisfaccion.consultar().filter(estado='ACTIVO'))
+    id_atencion = serializers.PrimaryKeyRelatedField(queryset=AtencionServicio.objects.select_related('codigo_cliente', 'id_cita').all())
+    respuestas = DetalleRespuestaEncuestaSerializer(many=True, write_only=True)
+    detalles = DetalleRespuestaEncuestaSerializer(many=True, read_only=True)
+    codigo_cliente = serializers.PrimaryKeyRelatedField(read_only=True)
+
+    class Meta:
+        model = RespuestaEncuestaSatisfaccion
+        fields = [
+            'id_respuesta',
+            'id_encuesta',
+            'id_atencion',
+            'codigo_cliente',
+            'respuestas',
+            'detalles',
+            'fecha_registro',
+        ]
+        read_only_fields = ['codigo_cliente', 'fecha_registro']
+
+    def validate(self, data):
+        request = self.context.get('request')
+        cliente = getattr(request, 'usuario_actual', None) if request else None
+        encuesta = data.get('id_encuesta')
+        atencion = data.get('id_atencion')
+        respuestas = data.get('respuestas', [])
+
+        if not cliente or not cliente.es_cliente:
+            raise serializers.ValidationError('Solo clientes autenticados pueden responder encuestas.')
+        if encuesta.estado != 'ACTIVO':
+            raise serializers.ValidationError({'id_encuesta': 'Encuesta inactiva.'})
+        if atencion.codigo_cliente_id != cliente.codigo:
+            raise serializers.ValidationError({'id_atencion': 'La atencion no pertenece al cliente autenticado.'})
+        if atencion.estado != 'FINALIZADA':
+            raise serializers.ValidationError({'id_atencion': 'Atencion no finalizada.'})
+        if RespuestaEncuestaSatisfaccion.objects.filter(id_encuesta=encuesta, id_atencion=atencion, codigo_cliente=cliente).exists():
+            raise serializers.ValidationError('Encuesta ya respondida.')
+
+        preguntas = list(encuesta.preguntas.prefetch_related('opciones').all())
+        preguntas_por_id = {pregunta.pk: pregunta for pregunta in preguntas}
+        ids_respondidas = [item['id_pregunta'].pk for item in respuestas]
+        if len(ids_respondidas) != len(set(ids_respondidas)):
+            raise serializers.ValidationError({'respuestas': 'No puede responder dos veces la misma pregunta.'})
+        respondidas = set(ids_respondidas)
+        obligatorias = {pregunta.pk for pregunta in preguntas if pregunta.obligatoria}
+        faltantes = obligatorias - respondidas
+        if faltantes:
+            raise serializers.ValidationError({'respuestas': 'Respuestas incompletas para preguntas obligatorias.'})
+
+        for item in respuestas:
+            pregunta = item['id_pregunta']
+            opcion = item.get('id_opcion')
+            texto = (item.get('respuesta_texto') or '').strip()
+            valor = item.get('valor')
+
+            if pregunta.pk not in preguntas_por_id:
+                raise serializers.ValidationError({'id_pregunta': 'La pregunta no pertenece a la encuesta seleccionada.'})
+            if pregunta.tipo_respuesta == 'TEXTO' and not texto:
+                raise serializers.ValidationError({'respuesta_texto': 'Debe responder la pregunta de texto.'})
+            if pregunta.tipo_respuesta in ['OPCION_UNICA', 'ESCALA']:
+                if not opcion:
+                    raise serializers.ValidationError({'id_opcion': 'Debe seleccionar una opcion de respuesta.'})
+                if opcion.id_pregunta_id != pregunta.pk:
+                    raise serializers.ValidationError({'id_opcion': 'La opcion no pertenece a la pregunta.'})
+                if valor is None:
+                    item['valor'] = opcion.valor
+
+        return data
+
+    @transaction.atomic
+    def create(self, validated_data):
+        respuestas = validated_data.pop('respuestas', [])
+        request = self.context.get('request')
+        cliente = getattr(request, 'usuario_actual', None) if request else None
+        respuesta = RespuestaEncuestaSatisfaccion.objects.create(codigo_cliente=cliente, **validated_data)
+        DetalleRespuestaEncuesta.objects.bulk_create([
+            DetalleRespuestaEncuesta(id_respuesta=respuesta, **item)
+            for item in respuestas
+        ])
+        return respuesta
 
 
 class ReclamoSugerenciaSerializer(serializers.ModelSerializer):

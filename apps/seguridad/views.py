@@ -6,13 +6,13 @@ from django.conf import settings
 from django.contrib.auth.hashers import make_password, check_password
 from django.core.mail import send_mail
 from django.utils import timezone
-from datetime import timedelta
+from datetime import time, timedelta
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
 from drf_spectacular.utils import extend_schema, OpenApiExample, OpenApiResponse
 import secrets
 
-from .models import AsistenciaBarbero, Bitacora, BloqueoHorario, HorarioLaboral, Permiso, Rol, Usuario
+from .models import AsistenciaBarbero, Bitacora, BloqueoHorario, HorarioLaboral, Permiso, PermisoLaboralPersonal, Rol, Usuario
 from .serializers import (
     AsistenciaBarberoSerializer,
     BitacoraSerializer,
@@ -21,6 +21,7 @@ from .serializers import (
     LoginSerializer,
     LogoutSerializer,
     PermisoSerializer,
+    PermisoLaboralPersonalSerializer,
     RolPermisosSerializer,
     SolicitarRecuperacionSerializer,
     ValidarCodigoRecuperacionSerializer,
@@ -1053,6 +1054,117 @@ class BloqueoHorarioDetalleView(APIView):
         bloqueo.save(update_fields=['estado'])
         registrar_bitacora(request, 'DESACTIVAR_BLOQUEO_HORARIO', f'Bloqueo desactivado: {bloqueo.id_bloqueo}.')
         return Response({'mensaje': 'Bloqueo de horario desactivado correctamente.'}, status=status.HTTP_200_OK)
+
+
+def crear_bloqueos_permiso_laboral(permiso):
+    fecha = permiso.fecha_inicio
+    while fecha <= permiso.fecha_fin:
+        BloqueoHorario.objects.update_or_create(
+            codigo_barbero=permiso.codigo_barbero,
+            fecha=fecha,
+            hora_inicio=time(0, 0),
+            hora_fin=time(23, 59),
+            motivo=f'Permiso laboral #{permiso.id_permiso_laboral}: {permiso.motivo}',
+            defaults={'estado': 'ACTIVO'},
+        )
+        fecha += timedelta(days=1)
+
+
+def inactivar_bloqueos_permiso_laboral(permiso):
+    BloqueoHorario.objects.filter(
+        codigo_barbero=permiso.codigo_barbero,
+        fecha__range=(permiso.fecha_inicio, permiso.fecha_fin),
+        motivo__startswith=f'Permiso laboral #{permiso.id_permiso_laboral}:',
+        estado='ACTIVO',
+    ).update(estado='INACTIVO')
+
+
+@extend_schema(tags=["Gestionar Permisos del Personal"])
+class PermisoLaboralPersonalListCreateView(APIView):
+    permission_classes = [EsAdmin]
+
+    @extend_schema(
+        summary="Listar permisos laborales del personal",
+        responses={200: PermisoLaboralPersonalSerializer(many=True)}
+    )
+    def get(self, request):
+        permisos = PermisoLaboralPersonal.consultar()
+        codigo_barbero = request.query_params.get('codigo_barbero')
+        estado_filtro = request.query_params.get('estado')
+        fecha_desde = request.query_params.get('fecha_desde')
+        fecha_hasta = request.query_params.get('fecha_hasta')
+
+        if codigo_barbero:
+            permisos = permisos.filter(codigo_barbero_id=codigo_barbero)
+        if estado_filtro:
+            permisos = permisos.filter(estado=estado_filtro.upper())
+        if fecha_desde:
+            permisos = permisos.filter(fecha_fin__gte=fecha_desde)
+        if fecha_hasta:
+            permisos = permisos.filter(fecha_inicio__lte=fecha_hasta)
+
+        registrar_bitacora(request, 'CONSULTAR_PERMISOS_LABORALES', 'Consulta de permisos laborales del personal.')
+        return Response(PermisoLaboralPersonalSerializer(permisos, many=True).data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        summary="Registrar permiso laboral",
+        request=PermisoLaboralPersonalSerializer,
+        responses={201: OpenApiResponse(description="Permiso registrado."), 400: OpenApiResponse(description="Datos invalidos.")}
+    )
+    def post(self, request):
+        serializer = PermisoLaboralPersonalSerializer(data=request.data, context={'request': request})
+        if serializer.is_valid():
+            permiso = serializer.save()
+            if permiso.estado == 'APROBADO':
+                crear_bloqueos_permiso_laboral(permiso)
+            registrar_bitacora(request, 'CREAR_PERMISO_LABORAL', f'Permiso laboral registrado: {permiso.id_permiso_laboral}.')
+            return Response(
+                {'mensaje': 'Permiso laboral registrado correctamente.', 'permiso': PermisoLaboralPersonalSerializer(permiso).data},
+                status=status.HTTP_201_CREATED
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@extend_schema(tags=["Gestionar Permisos del Personal"])
+class PermisoLaboralPersonalDetalleView(APIView):
+    permission_classes = [EsAdmin]
+
+    def _get_permiso(self, id_permiso_laboral):
+        return PermisoLaboralPersonal.consultar().filter(pk=id_permiso_laboral).first()
+
+    @extend_schema(
+        summary="Ver detalle de permiso laboral",
+        responses={200: PermisoLaboralPersonalSerializer, 404: OpenApiResponse(description="No encontrado.")}
+    )
+    def get(self, request, id_permiso_laboral):
+        permiso = self._get_permiso(id_permiso_laboral)
+        if not permiso:
+            return Response({'error': 'Permiso laboral no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(PermisoLaboralPersonalSerializer(permiso).data, status=status.HTTP_200_OK)
+
+    @extend_schema(
+        summary="Actualizar permiso laboral",
+        request=PermisoLaboralPersonalSerializer,
+        responses={200: OpenApiResponse(description="Permiso actualizado."), 400: OpenApiResponse(description="Datos invalidos.")}
+    )
+    def put(self, request, id_permiso_laboral):
+        permiso = self._get_permiso(id_permiso_laboral)
+        if not permiso:
+            return Response({'error': 'Permiso laboral no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+        estado_anterior = permiso.estado
+        serializer = PermisoLaboralPersonalSerializer(permiso, data=request.data, partial=True, context={'request': request})
+        if serializer.is_valid():
+            permiso = serializer.save()
+            if permiso.estado == 'APROBADO':
+                crear_bloqueos_permiso_laboral(permiso)
+            elif estado_anterior == 'APROBADO' and permiso.estado in ['RECHAZADO', 'CANCELADO']:
+                inactivar_bloqueos_permiso_laboral(permiso)
+            registrar_bitacora(request, 'ACTUALIZAR_PERMISO_LABORAL', f'Permiso laboral actualizado: {permiso.id_permiso_laboral}.')
+            return Response(
+                {'mensaje': 'Permiso laboral actualizado correctamente.', 'permiso': PermisoLaboralPersonalSerializer(permiso).data},
+                status=status.HTTP_200_OK
+            )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 # CU9 - Gestionar asistencia

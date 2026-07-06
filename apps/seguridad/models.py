@@ -265,4 +265,57 @@ class AsistenciaBarbero(models.Model):
 
     def __str__(self):
         return f"{self.codigo_barbero.codigo} {self.fecha} {self.estado}"
+
+
+class PermisoLaboralPersonal(models.Model):
+    # Caso de uso: Gestionar permisos laborales del personal barbero.
+    ESTADOS = (
+        ('PENDIENTE', 'Pendiente'),
+        ('APROBADO', 'Aprobado'),
+        ('RECHAZADO', 'Rechazado'),
+        ('CANCELADO', 'Cancelado'),
+    )
+
+    id_permiso_laboral = models.AutoField(primary_key=True)
+    codigo_barbero = models.ForeignKey(
+        Usuario,
+        on_delete=models.PROTECT,
+        db_column='codigo_barbero',
+        related_name='permisos_laborales'
+    )
+    fecha_inicio = models.DateField()
+    fecha_fin = models.DateField()
+    motivo = models.TextField()
+    estado = models.CharField(max_length=20, choices=ESTADOS, default='PENDIENTE')
+    respuesta_admin = models.TextField(blank=True)
+    registrado_por = models.ForeignKey(
+        Usuario,
+        on_delete=models.SET_NULL,
+        db_column='registrado_por',
+        related_name='permisos_laborales_registrados',
+        null=True,
+        blank=True,
+    )
+    fecha_registro = models.DateTimeField(auto_now_add=True)
+    fecha_actualizacion = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = '"seguridad"."permiso_laboral_personal"'
+        verbose_name = 'Permiso laboral del personal'
+        verbose_name_plural = 'Permisos laborales del personal'
+        ordering = ['-fecha_inicio', 'codigo_barbero']
+
+    def __str__(self):
+        return f"{self.codigo_barbero.codigo} {self.fecha_inicio}-{self.fecha_fin} {self.estado}"
+
+    @classmethod
+    def consultar(cls):
+        return cls.objects.select_related('codigo_barbero', 'codigo_barbero__id_rol', 'registrado_por')
+
+    def cambiar_estado(self, estado, respuesta_admin=''):
+        self.estado = estado
+        if respuesta_admin:
+            self.respuesta_admin = respuesta_admin
+        self.save(update_fields=['estado', 'respuesta_admin', 'fecha_actualizacion'])
+        return self
  
